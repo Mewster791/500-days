@@ -1,0 +1,6 @@
+{
+  "name": "500 Days After",
+  "description": "A 3D low-poly isometric post-apocalyptic survival game. Scavenge nuclear ruins, build a self-sustaining shelter, and survive 500 days or launch a high-altitude signal flare for early rescue.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
