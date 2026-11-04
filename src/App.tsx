@@ -3,10 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AdminPanel } from './components/AdminPanel';
 import { EndScreens } from './components/EndScreens';
 import { GameHUD } from './components/GameHUD';
+import { LoreModal } from './components/LoreModal';
 import { MainMenu } from './components/MainMenu';
+import { LORE_LOGS } from './data/lore';
 import { WastelandScene } from './three/WastelandScene';
 import {
   BaseStructures,
@@ -18,13 +21,44 @@ import {
   INITIAL_DAYS,
   Inventory,
   NearbyPrompt,
+  PlayerHudTelemetry,
   SECONDS_PER_DAY,
+  TeleportCommand,
   ToastNotice,
   VictoryMethod,
+  WEATHER_CATALOG,
+  WeatherType,
   WorldNode,
 } from './types/game';
 import { soundFX } from './utils/audio';
-import { BASE_CAMP_SPOTS, generateWastelandData } from './utils/worldGen';
+import {
+  BASE_CAMP_SPOTS,
+  SPIRE_DECK,
+  generateWastelandData,
+} from './utils/worldGen';
+
+const ADMIN_SECRET_DIGITS = ['9', '4', '2', '0', '6', '7', '2', '2'] as const;
+
+const WEATHER_POOL: WeatherType[] = [
+  WeatherType.Clear,
+  WeatherType.AcidRain,
+  WeatherType.AshStorm,
+  WeatherType.Heatwave,
+];
+
+function extractDigitFromKeyEvent(e: KeyboardEvent): string | null {
+  if (/^[0-9]$/.test(e.key)) {
+    return e.key;
+  }
+  if (e.code.startsWith('Digit') && e.code.length === 6) {
+    return e.code.slice(5);
+  }
+  if (e.code.startsWith('Numpad') && e.code.length === 7) {
+    const ch = e.code.slice(6);
+    if (/^[0-9]$/.test(ch)) return ch;
+  }
+  return null;
+}
 
 function createInitialNodes(seed: number): {
   nodes: WorldNode[];
@@ -32,7 +66,6 @@ function createInitialNodes(seed: number): {
 } {
   const { nodes, hazards } = generateWastelandData(seed);
 
-  // Register interactive Base Camp structure nodes (active once constructed)
   nodes.push(
     {
       id: 'base-shelter',
@@ -41,8 +74,10 @@ function createInitialNodes(seed: number): {
       x: BASE_CAMP_SPOTS.shelter.x,
       y: 0,
       z: BASE_CAMP_SPOTS.shelter.z,
-      interactRadius: 4.2,
-      colliderRadius: 2.1,
+      interactRadius: 4.4,
+      colliderRadius: 2.2,
+      boxHalfW: 2.15,
+      boxHalfD: 1.85,
       rotationY: BASE_CAMP_SPOTS.shelter.rotationY,
       scale: 1,
       variant: 0,
@@ -53,12 +88,12 @@ function createInitialNodes(seed: number): {
       id: 'base-purifier',
       kind: 'purifier',
       label: 'Water Purifier Unit',
-      x: BASE_CAMP_SPOTS.purifier.x,
+      x: BASE_CAMP_SPOTS.purifiers[0].x,
       y: 0,
-      z: BASE_CAMP_SPOTS.purifier.z,
-      interactRadius: 3.4,
+      z: BASE_CAMP_SPOTS.purifiers[0].z,
+      interactRadius: 3.6,
       colliderRadius: 1.25,
-      rotationY: BASE_CAMP_SPOTS.purifier.rotationY,
+      rotationY: BASE_CAMP_SPOTS.purifiers[0].rotationY,
       scale: 1,
       variant: 0,
       cooldownRemaining: 0,
@@ -68,12 +103,14 @@ function createInitialNodes(seed: number): {
       id: 'base-farm',
       kind: 'farm',
       label: 'Hydroponic Dome Farm',
-      x: BASE_CAMP_SPOTS.farm.x,
+      x: BASE_CAMP_SPOTS.farms[0].x,
       y: 0,
-      z: BASE_CAMP_SPOTS.farm.z,
-      interactRadius: 3.6,
+      z: BASE_CAMP_SPOTS.farms[0].z,
+      interactRadius: 3.8,
       colliderRadius: 1.65,
-      rotationY: BASE_CAMP_SPOTS.farm.rotationY,
+      boxHalfW: 1.6,
+      boxHalfD: 1.1,
+      rotationY: BASE_CAMP_SPOTS.farms[0].rotationY,
       scale: 1,
       variant: 0,
       cooldownRemaining: 0,
@@ -97,6 +134,7 @@ const INITIAL_INVENTORY: Inventory = {
 const INITIAL_STRUCTURES: BaseStructures = {
   shelter: false,
   purifierCount: 0,
+  purifierAutoTimerSec: 0,
   farmCount: 0,
   farmTimerSec: 0,
 };
@@ -105,14 +143,19 @@ export default function App() {
   const [sessionId, setSessionId] = useState<number>(1);
   const [phase, setPhase] = useState<GamePhase>(GamePhase.Menu);
   const [difficulty, setDifficulty] = useState<Difficulty>(Difficulty.Normal);
+  const [weather, setWeather] = useState<WeatherType>(WeatherType.Clear);
   const [victoryMethod, setVictoryMethod] =
     useState<VictoryMethod>('countdown');
   const [deathCause, setDeathCause] = useState<DeathCause>('starvation');
+  const [finalDaysSurvived, setFinalDaysSurvived] = useState<number>(1);
 
   const initialWorld = useRef(createInitialNodes(104729));
   const nodesRef = useRef<WorldNode[]>(initialWorld.current.nodes);
   const [hazards, setHazards] = useState<HazardZone[]>(
     initialWorld.current.hazards
+  );
+  const [terminalsSnapshot, setTerminalsSnapshot] = useState<WorldNode[]>(() =>
+    initialWorld.current.nodes.filter((n) => n.kind === 'terminal')
   );
 
   // Display state synced smoothly from simulation ref
@@ -121,10 +164,20 @@ export default function App() {
   const [health, setHealth] = useState<number>(100);
   const [hunger, setHunger] = useState<number>(100);
   const [thirst, setThirst] = useState<number>(100);
-  const [altitude, setAltitude] = useState<number>(0);
+  const [telemetry, setTelemetry] = useState<PlayerHudTelemetry>({
+    x: 0,
+    y: 0,
+    z: 2,
+    yaw: 0,
+    stamina: 100,
+  });
   const [inRadiation, setInRadiation] = useState<boolean>(false);
+  const [isAcidRainExposed, setIsAcidRainExposed] = useState<boolean>(false);
 
   const [inventory, setInventory] = useState<Inventory>(INITIAL_INVENTORY);
+  const [flareUnlocked, setFlareUnlocked] = useState<boolean>(false);
+  const [discoveredLoreIds, setDiscoveredLoreIds] = useState<string[]>([]);
+  const [journalOpen, setJournalOpen] = useState<boolean>(false);
   const [structures, setStructures] =
     useState<BaseStructures>(INITIAL_STRUCTURES);
   const [nearbyPrompt, setNearbyPrompt] = useState<NearbyPrompt | null>(null);
@@ -132,18 +185,40 @@ export default function App() {
   const [muted, setMuted] = useState<boolean>(false);
   const [flareLaunching, setFlareLaunching] = useState<boolean>(false);
 
-  // High-precision mutable simulation state for exact survival math
+  // Admin Panel & Debug state
+  const [adminOpen, setAdminOpen] = useState<boolean>(false);
+  const [weatherLocked, setWeatherLocked] = useState<boolean>(false);
+  const [godMode, setGodMode] = useState<boolean>(false);
+  const [speedBoost, setSpeedBoost] = useState<boolean>(false);
+  const [teleportCommand, setTeleportCommand] =
+    useState<TeleportCommand | null>(null);
+
+  // Shared refs with Three.js loop
+  const elapsedSecRef = useRef<number>(0);
+  const scavengeBurstRef = useRef<{ nonce: number; nodeId: string } | null>(
+    null
+  );
+
+  // Secret Q + 9-4-2-0-6-7-2-2 combo tracking refs
+  const isHoldingQRef = useRef<boolean>(false);
+  const secretComboIdxRef = useRef<number>(0);
+
+  // High-precision mutable simulation state
   const simRef = useRef({
     elapsedSec: 0,
     health: 100,
     hunger: 100,
     thirst: 100,
-    starveDehydrateTimer: 0, // Counts up to 5.0s for -5 HP ticks
+    starveDehydrateTimer: 0,
     farmTimer: 0,
+    purifierAutoTimer: 0,
+    rainCatchTimer: 0,
+    weatherCycleTimer: 0,
+    nextWeatherDuration: 52,
     geigerTimer: 0,
     hudSyncTimer: 0,
-    altitude: 0,
     inRadiation: false,
+    acidRainExposed: false,
   });
 
   const inventoryRef = useRef<Inventory>(INITIAL_INVENTORY);
@@ -155,6 +230,18 @@ export default function App() {
   const difficultyRef = useRef<Difficulty>(Difficulty.Normal);
   difficultyRef.current = difficulty;
 
+  const weatherRef = useRef<WeatherType>(WeatherType.Clear);
+  weatherRef.current = weather;
+
+  const weatherLockedRef = useRef<boolean>(false);
+  weatherLockedRef.current = weatherLocked;
+
+  const godModeRef = useRef<boolean>(false);
+  godModeRef.current = godMode;
+
+  const discoveredLoreRef = useRef<string[]>([]);
+  discoveredLoreRef.current = discoveredLoreIds;
+
   const toastIdCounter = useRef(1);
   const pushToast = useCallback(
     (message: string, tone: ToastNotice['tone'] = 'neutral') => {
@@ -162,10 +249,116 @@ export default function App() {
       setToasts((prev) => [...prev.slice(-3), { id, message, tone }]);
       window.setTimeout(() => {
         setToasts((prev) => prev.filter((item) => item.id !== id));
-      }, 3200);
+      }, 3400);
     },
     []
   );
+
+  const unlockLoreEntry = useCallback(
+    (specificLoreId?: string) => {
+      const current = discoveredLoreRef.current;
+      let targetId = specificLoreId;
+
+      if (!targetId || current.includes(targetId)) {
+        const remaining = LORE_LOGS.filter((l) => !current.includes(l.id));
+        if (remaining.length === 0) return null;
+        targetId = remaining[0].id;
+      }
+
+      const found = LORE_LOGS.find((l) => l.id === targetId);
+      if (!found || current.includes(found.id)) return null;
+
+      setDiscoveredLoreIds((prev) =>
+        prev.includes(found.id) ? prev : [...prev, found.id]
+      );
+      return found;
+    },
+    []
+  );
+
+  // Unlock Signal Flare option the moment player holds >=100 Scrap Metal and >=1 Chemicals
+  useEffect(() => {
+    if (
+      !flareUnlocked &&
+      inventory.scrapMetal >= 100 &&
+      inventory.chemicals >= 1
+    ) {
+      setFlareUnlocked(true);
+      soundFX.playRareFind();
+      pushToast(
+        'Signal Flare option unlocked in Base & Crafting!',
+        'rare'
+      );
+    }
+  }, [flareUnlocked, inventory.scrapMetal, inventory.chemicals, pushToast]);
+
+  // Secret Admin Combo Listener: Hold Q and press 9 -> 4 -> 2 -> 0 -> 6 -> 7 -> 2 -> 2
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Escape') {
+        setJournalOpen(false);
+        setAdminOpen(false);
+        return;
+      }
+
+      const isQ = e.code === 'KeyQ' || e.key === 'q' || e.key === 'Q';
+      if (isQ) {
+        if (!isHoldingQRef.current) {
+          isHoldingQRef.current = true;
+          secretComboIdxRef.current = 0;
+        }
+        return;
+      }
+
+      if (!isHoldingQRef.current || e.repeat) return;
+
+      if (
+        e.key === 'Shift' ||
+        e.key === 'Control' ||
+        e.key === 'Alt' ||
+        e.key === 'Meta'
+      ) {
+        return;
+      }
+
+      const digit = extractDigitFromKeyEvent(e);
+      const expected = ADMIN_SECRET_DIGITS[secretComboIdxRef.current];
+
+      if (digit !== null && digit === expected) {
+        secretComboIdxRef.current += 1;
+        if (secretComboIdxRef.current >= ADMIN_SECRET_DIGITS.length) {
+          secretComboIdxRef.current = 0;
+          setAdminOpen((prev) => !prev);
+          soundFX.playRareFind();
+        }
+      } else {
+        secretComboIdxRef.current =
+          digit === ADMIN_SECRET_DIGITS[0] ? 1 : 0;
+      }
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      const isQ = e.code === 'KeyQ' || e.key === 'q' || e.key === 'Q';
+      if (isQ) {
+        isHoldingQRef.current = false;
+        secretComboIdxRef.current = 0;
+      }
+    };
+
+    const onWindowBlur = () => {
+      isHoldingQRef.current = false;
+      secretComboIdxRef.current = 0;
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onWindowBlur);
+    };
+  }, []);
 
   const startNewRun = useCallback(
     (chosenDifficulty: Difficulty) => {
@@ -173,7 +366,12 @@ export default function App() {
       const generated = createInitialNodes(newSeed);
       nodesRef.current = generated.nodes;
       setHazards(generated.hazards);
+      setTerminalsSnapshot(
+        generated.nodes.filter((n) => n.kind === 'terminal')
+      );
 
+      elapsedSecRef.current = 0;
+      scavengeBurstRef.current = null;
       simRef.current = {
         elapsedSec: 0,
         health: 100,
@@ -181,30 +379,41 @@ export default function App() {
         thirst: 100,
         starveDehydrateTimer: 0,
         farmTimer: 0,
+        purifierAutoTimer: 0,
+        rainCatchTimer: 0,
+        weatherCycleTimer: 0,
+        nextWeatherDuration: 52,
         geigerTimer: 0,
         hudSyncTimer: 0,
-        altitude: 0,
         inRadiation: false,
+        acidRainExposed: false,
       };
 
       setDifficulty(chosenDifficulty);
+      setWeather(WeatherType.Clear);
       setDaysRemaining(INITIAL_DAYS);
       setDayProgress(0);
+      setFinalDaysSurvived(1);
       setHealth(100);
       setHunger(100);
       setThirst(100);
-      setAltitude(0);
+      setTelemetry({ x: 0, y: 0, z: 2, yaw: 0, stamina: 100 });
       setInRadiation(false);
+      setIsAcidRainExposed(false);
       setInventory({ ...INITIAL_INVENTORY });
+      setFlareUnlocked(false);
+      setDiscoveredLoreIds([]);
+      setJournalOpen(false);
       setStructures({ ...INITIAL_STRUCTURES });
       setNearbyPrompt(null);
       setToasts([]);
       setFlareLaunching(false);
+      setTeleportCommand(null);
       setSessionId((prev) => prev + 1);
       setPhase(GamePhase.Playing);
 
       pushToast(
-        'Scavenge ruins with [E]. Reach NE Overpass Spire for high-altitude extraction.',
+        'Entered Quarantine Sector 09. Press [E] near terminals & ruins to scavenge.',
         'positive'
       );
     },
@@ -254,7 +463,7 @@ export default function App() {
     setStructures((prev) => ({ ...prev, shelter: true }));
     soundFX.playBuild();
     pushToast(
-      'Shelter constructed! Water Purifier & Hydroponic Farm unlocked.',
+      'Shelter & Campfire constructed! Purifier, Farm & Acid Rain cover active.',
       'positive'
     );
   }, [pushToast]);
@@ -262,7 +471,7 @@ export default function App() {
   const handleBuildPurifier = useCallback(() => {
     const inv = inventoryRef.current;
     const st = structuresRef.current;
-    if (!st.shelter || inv.scrapMetal < 5) return;
+    if (!st.shelter || st.purifierCount >= 2 || inv.scrapMetal < 5) return;
 
     setInventory((prev) => ({
       ...prev,
@@ -274,7 +483,7 @@ export default function App() {
     }));
     soundFX.playBuild();
     pushToast(
-      'Water Purifier built! Convert Dirty Water into Clean Water anytime.',
+      'Water Purifier online! Instant purify + auto-distills Dirty Water every 30s.',
       'positive'
     );
   }, [pushToast]);
@@ -299,7 +508,14 @@ export default function App() {
   const handleBuildFarm = useCallback(() => {
     const inv = inventoryRef.current;
     const st = structuresRef.current;
-    if (!st.shelter || inv.wood < 10 || inv.cannedFood < 5) return;
+    if (
+      !st.shelter ||
+      st.farmCount >= 3 ||
+      inv.wood < 10 ||
+      inv.cannedFood < 5
+    ) {
+      return;
+    }
 
     setInventory((prev) => ({
       ...prev,
@@ -312,7 +528,7 @@ export default function App() {
     }));
     soundFX.playBuild();
     pushToast(
-      'Hydroponic Farm online! Producing +1 Canned Food every 60s.',
+      'Hydroponic Farm dome constructed! Producing +1 Canned Food per cycle.',
       'positive'
     );
   }, [pushToast]);
@@ -337,6 +553,16 @@ export default function App() {
   const triggerFlareExtraction = useCallback(
     (currentAlt: number) => {
       if (!inventoryRef.current.signalFlare || flareLaunching) return;
+
+      const weatherSpec = WEATHER_CATALOG[weatherRef.current];
+      if (weatherSpec.blocksFlare) {
+        pushToast(
+          'Heavy Ash Storm blocks aerial flare visibility — wait for clearer skies!',
+          'warning'
+        );
+        return;
+      }
+
       if (currentAlt < HIGH_ALTITUDE_THRESHOLD) {
         pushToast(
           `Altitude too low (${currentAlt.toFixed(
@@ -351,7 +577,12 @@ export default function App() {
       soundFX.playFlareLaunch();
       pushToast('Signal Flare ignited! Extraction airship inbound!', 'rare');
 
+      const escapedDays = Math.max(
+        1,
+        Math.ceil(simRef.current.elapsedSec / SECONDS_PER_DAY)
+      );
       window.setTimeout(() => {
+        setFinalDaysSurvived(escapedDays);
         setVictoryMethod('flare');
         setPhase(GamePhase.Victory);
       }, 950);
@@ -359,14 +590,18 @@ export default function App() {
     [flareLaunching, pushToast]
   );
 
-  // Hotkeys [1] Eat Food, [2] Drink Clean Water
+  // Hotkeys [1] Eat Food, [2] Drink Clean Water, [J] Toggle Field Journal
   useEffect(() => {
     const onHotkey = (e: KeyboardEvent) => {
-      if (phase !== GamePhase.Playing || e.repeat) return;
+      if (phase !== GamePhase.Playing || e.repeat || isHoldingQRef.current) {
+        return;
+      }
       if (e.code === 'Digit1') {
         handleConsumeFood();
       } else if (e.code === 'Digit2') {
         handleConsumeWater();
+      } else if (e.code === 'KeyJ') {
+        setJournalOpen((prev) => !prev);
       }
     };
     window.addEventListener('keydown', onHotkey);
@@ -380,26 +615,23 @@ export default function App() {
       const node = nodesRef.current.find((n) => n.id === nodeId);
       if (!node) return;
 
-      // High-altitude Signal Flare launch pad
       if (node.kind === 'spire_pad') {
         if (inventoryRef.current.signalFlare) {
           triggerFlareExtraction(playerAltitude);
-        } else {
+        } else if (flareUnlocked) {
           pushToast(
-            'High-Altitude Pad (7.4m): Craft a Signal Flare (100 Scrap + 1 Chemicals) to call rescue.',
+            'High-Altitude Pad (7.4m): Craft your Signal Flare in the Sidebar to launch!',
             'neutral'
           );
         }
         return;
       }
 
-      // Built Water Purifier interaction
       if (node.kind === 'purifier') {
         handlePurifyWater();
         return;
       }
 
-      // Built Shelter interaction
       if (node.kind === 'shelter') {
         if (node.cooldownRemaining > 0) {
           pushToast(
@@ -409,16 +641,19 @@ export default function App() {
           return;
         }
         node.cooldownRemaining = node.cooldownDuration;
-        simRef.current.health = Math.min(100, simRef.current.health + 10);
+        simRef.current.health = Math.min(100, simRef.current.health + 12);
         setHealth(simRef.current.health);
         soundFX.playBuild();
-        pushToast('Rested inside Shelter (+10 Health)', 'positive');
+        pushToast('Rested by Shelter hearth (+12 Health)', 'positive');
         return;
       }
 
-      // Built Farm inspection
       if (node.kind === 'farm') {
-        const rem = Math.max(0, Math.ceil(60 - simRef.current.farmTimer));
+        const mult = WEATHER_CATALOG[weatherRef.current].farmSpeedMult;
+        const rem = Math.max(
+          0,
+          Math.ceil((60 - simRef.current.farmTimer) / mult)
+        );
         pushToast(
           `Hydroponic Farm active · Next Canned Food harvest in ${rem}s`,
           'positive'
@@ -426,7 +661,29 @@ export default function App() {
         return;
       }
 
-      // Scavenging City Ruins, Vehicles, Scrap Piles, Timber
+      // Civil Defense Terminal Interaction (Always unlocks its assigned Lore Log on first visit!)
+      if (node.kind === 'terminal') {
+        const unlockedEntry = unlockLoreEntry(node.loreId);
+        if (unlockedEntry) {
+          node.cooldownRemaining = node.cooldownDuration;
+          scavengeBurstRef.current = {
+            nonce: (scavengeBurstRef.current?.nonce ?? 0) + 1,
+            nodeId: node.id,
+          };
+          setInventory((prev) => ({
+            ...prev,
+            scrapMetal: prev.scrapMetal + 4,
+            cleanWater: prev.cleanWater + 1,
+          }));
+          soundFX.playLoreTerminal();
+          pushToast(
+            `Archived [${unlockedEntry.code}] "${unlockedEntry.title}" (+4 Scrap, +1 Clean H₂O) — Press [J]`,
+            'rare'
+          );
+          return;
+        }
+      }
+
       if (node.cooldownRemaining > 0) {
         pushToast(
           `Already scavenged · Wait ${Math.ceil(
@@ -438,6 +695,12 @@ export default function App() {
       }
 
       node.cooldownRemaining = node.cooldownDuration;
+      scavengeBurstRef.current = {
+        nonce: (scavengeBurstRef.current?.nonce ?? 0) + 1,
+        nodeId: node.id,
+      };
+
+      const activeWeather = weatherRef.current;
 
       let scrapGain = 0;
       let woodGain = 0;
@@ -445,25 +708,45 @@ export default function App() {
       let dirtyWaterGain = 0;
       let chemGain = 0;
 
-      if (node.kind === 'building') {
-        scrapGain = 2 + Math.floor(Math.random() * 4); // 2–5 Scrap Metal
+      if (node.kind === 'terminal') {
+        scrapGain = 3 + Math.floor(Math.random() * 3);
+      } else if (node.kind === 'building') {
+        scrapGain = 2 + Math.floor(Math.random() * 4);
         woodGain = Math.random() < 0.65 ? 1 + Math.floor(Math.random() * 3) : 0;
         if (Math.random() < 0.45) foodGain = 1;
-        if (Math.random() < 0.5) dirtyWaterGain = 1;
+        if (
+          Math.random() <
+          (activeWeather === WeatherType.AcidRain ? 0.8 : 0.5)
+        ) {
+          dirtyWaterGain = 1;
+        }
         // Exact 2% spawn rate for [Chemicals] in Ruined Buildings
         if (Math.random() < 0.02) {
           chemGain = 1;
         }
       } else if (node.kind === 'vehicle') {
-        scrapGain = 2 + Math.floor(Math.random() * 4); // 2–5 Scrap Metal
-        if (Math.random() < 0.5) dirtyWaterGain = 1;
+        scrapGain = 2 + Math.floor(Math.random() * 4);
+        if (
+          Math.random() <
+          (activeWeather === WeatherType.AcidRain ? 0.8 : 0.5)
+        ) {
+          dirtyWaterGain = 1;
+        }
         if (Math.random() < 0.25) foodGain = 1;
       } else if (node.kind === 'scrap') {
-        scrapGain = 3 + Math.floor(Math.random() * 4); // 3–6 Scrap Metal
+        scrapGain =
+          3 +
+          Math.floor(Math.random() * 4) +
+          (activeWeather === WeatherType.AshStorm ? 2 : 0);
         woodGain = 1 + Math.floor(Math.random() * 2);
       } else if (node.kind === 'timber') {
-        woodGain = 3 + Math.floor(Math.random() * 4); // 3–6 Wood
-        if (Math.random() < 0.35) dirtyWaterGain = 1;
+        woodGain = 3 + Math.floor(Math.random() * 4);
+        if (
+          Math.random() <
+          (activeWeather === WeatherType.AcidRain ? 0.65 : 0.35)
+        ) {
+          dirtyWaterGain = 1;
+        }
       }
 
       setInventory((prev) => ({
@@ -475,62 +758,145 @@ export default function App() {
         chemicals: prev.chemicals + chemGain,
       }));
 
+      // 16% chance when scavenging buildings or vehicles to also uncover an uncollected survivor Field Log
+      let bonusLoreTitle: string | null = null;
+      if (
+        (node.kind === 'building' || node.kind === 'vehicle') &&
+        Math.random() < 0.16
+      ) {
+        const entry = unlockLoreEntry();
+        if (entry) {
+          bonusLoreTitle = entry.title;
+        }
+      }
+
       const parts: string[] = [];
-      if (scrapGain > 0) parts.push(`+${scrapGain} Scrap Metal`);
+      if (scrapGain > 0) parts.push(`+${scrapGain} Scrap`);
       if (woodGain > 0) parts.push(`+${woodGain} Wood`);
-      if (foodGain > 0) parts.push(`+${foodGain} Canned Food`);
-      if (dirtyWaterGain > 0) parts.push(`+${dirtyWaterGain} Dirty Water`);
+      if (foodGain > 0) parts.push(`+${foodGain} Food`);
+      if (dirtyWaterGain > 0) parts.push(`+${dirtyWaterGain} Dirty H₂O`);
       if (chemGain > 0) parts.push(`+${chemGain} Chemicals!`);
 
       if (chemGain > 0) {
         soundFX.playRareFind();
         pushToast(`RARE SALVAGE: ${parts.join(', ')}`, 'rare');
+      } else if (bonusLoreTitle) {
+        soundFX.playLoreTerminal();
+        pushToast(
+          `${parts.join(', ')} · Found Field Log: "${bonusLoreTitle}" [J]`,
+          'positive'
+        );
       } else {
         soundFX.playScavenge();
         pushToast(`Scavenged: ${parts.join(', ')}`, 'neutral');
       }
     },
-    [phase, handlePurifyWater, pushToast, triggerFlareExtraction]
+    [
+      flareUnlocked,
+      phase,
+      handlePurifyWater,
+      pushToast,
+      triggerFlareExtraction,
+      unlockLoreEntry,
+    ]
   );
 
-  // Per-frame Survival Math & Day/Night Countdown Simulation
+  // Per-frame Survival Math, Weather Simulation, Fall Impact & Countdown
   const handleFrameTick = useCallback(
     (
       dt: number,
-      _px: number,
+      px: number,
       py: number,
-      _pz: number,
-      inRadiationZone: boolean
+      pz: number,
+      pyaw: number,
+      pstamina: number,
+      inRadiationZone: boolean,
+      fallDamage: number
     ) => {
       const sim = simRef.current;
       sim.elapsedSec += dt;
-      sim.altitude = py;
+      elapsedSecRef.current = sim.elapsedSec;
       sim.inRadiation = inRadiationZone;
 
-      // 1. Countdown 500 In-Game Days (1 Day = 60 real-world seconds)
+      const invincible = godModeRef.current;
+
+      // Apply ballistic fall damage if player leaped off high overpass cliff
+      if (fallDamage > 0 && !invincible) {
+        sim.health = Math.max(0, sim.health - fallDamage);
+        pushToast(`Hard fall impact (-${fallDamage} Health)`, 'warning');
+        if (sim.health <= 0) {
+          setHealth(0);
+          setFinalDaysSurvived(
+            Math.max(1, Math.ceil(sim.elapsedSec / SECONDS_PER_DAY))
+          );
+          setDeathCause('fall_impact');
+          setPhase(GamePhase.GameOver);
+          return;
+        }
+      }
+
+      // 1. Dynamic Weather Auto-Cycle (every ~48-68s when not locked)
+      if (!weatherLockedRef.current) {
+        sim.weatherCycleTimer += dt;
+        if (sim.weatherCycleTimer >= sim.nextWeatherDuration) {
+          sim.weatherCycleTimer = 0;
+          sim.nextWeatherDuration = 48 + Math.random() * 20;
+
+          const current = weatherRef.current;
+          const candidates = WEATHER_POOL.filter((w) => w !== current);
+          const nextW =
+            candidates[Math.floor(Math.random() * candidates.length)];
+          weatherRef.current = nextW;
+          setWeather(nextW);
+          if (
+            nextW === WeatherType.AcidRain ||
+            nextW === WeatherType.AshStorm
+          ) {
+            soundFX.playWeatherRumble();
+          }
+          pushToast(
+            `Weather Shift: ${WEATHER_CATALOG[nextW].label} (${WEATHER_CATALOG[nextW].effectsSummary})`,
+            nextW === WeatherType.Clear ? 'positive' : 'warning'
+          );
+        }
+      }
+
+      const activeWeather = weatherRef.current;
+      const weatherSpec = WEATHER_CATALOG[activeWeather];
+
+      // 2. Countdown 500 In-Game Days (1 Day = 60 real-world seconds)
       const daysPassed = Math.floor(sim.elapsedSec / SECONDS_PER_DAY);
       const remaining = Math.max(0, INITIAL_DAYS - daysPassed);
       if (remaining <= 0) {
         setDaysRemaining(0);
+        setFinalDaysSurvived(INITIAL_DAYS);
         setVictoryMethod('countdown');
         setPhase(GamePhase.Victory);
         return;
       }
 
-      // 2. Hunger & Thirst Decay based on Difficulty
+      // 3. Hunger & Thirst Decay
       const diff = difficultyRef.current;
-      if (diff === Difficulty.Easy) {
-        sim.hunger = 100;
-        sim.thirst = 100;
+      if (diff === Difficulty.Easy || invincible) {
+        if (diff === Difficulty.Easy) {
+          sim.hunger = 100;
+          sim.thirst = 100;
+        }
+        if (invincible) {
+          sim.health = 100;
+          sim.hunger = 100;
+          sim.thirst = 100;
+        }
         sim.starveDehydrateTimer = 0;
       } else {
         const decayInterval = diff === Difficulty.Normal ? 60 : 40;
-        const decayAmount = dt / decayInterval;
-        sim.hunger = Math.max(0, sim.hunger - decayAmount);
-        sim.thirst = Math.max(0, sim.thirst - decayAmount);
+        const baseDecay = dt / decayInterval;
+        sim.hunger = Math.max(0, sim.hunger - baseDecay);
+        sim.thirst = Math.max(
+          0,
+          sim.thirst - baseDecay * weatherSpec.thirstDecayMult
+        );
 
-        // Health Decay Rule (Normal & Hard Only):
-        // If Hunger OR Thirst hits 0, Health decays by 5 points every 5 real-world seconds
         if (sim.hunger <= 0 || sim.thirst <= 0) {
           sim.starveDehydrateTimer += dt;
           while (sim.starveDehydrateTimer >= 5.0) {
@@ -542,9 +908,65 @@ export default function App() {
         }
       }
 
-      // 3. Environmental Hazard: Radioactive Fallout Craters
+      // 4. Acid Rain Mechanics + Passive Water Purifier Auto-Distillation
+      let exposedToAcidRain = false;
+      const pCount = structuresRef.current.purifierCount;
+
+      if (activeWeather === WeatherType.AcidRain) {
+        const shelteredByBase =
+          structuresRef.current.shelter &&
+          Math.hypot(
+            px - BASE_CAMP_SPOTS.shelter.x,
+            pz - BASE_CAMP_SPOTS.shelter.z
+          ) <= 9.0;
+
+        if (!shelteredByBase && !invincible) {
+          exposedToAcidRain = true;
+          sim.health = Math.max(0, sim.health - dt * 0.35);
+        }
+
+        if (pCount > 0) {
+          sim.rainCatchTimer += dt;
+          if (sim.rainCatchTimer >= 20) {
+            sim.rainCatchTimer -= 20;
+            setInventory((prev) => ({
+              ...prev,
+              dirtyWater: prev.dirtyWater + pCount,
+            }));
+            pushToast(
+              `Acid Rain Catchment: +${pCount} Dirty Water collected at Purifier`,
+              'positive'
+            );
+          }
+        }
+      } else {
+        sim.rainCatchTimer = 0;
+      }
+      sim.acidRainExposed = exposedToAcidRain;
+
+      // Passive Water Purifier Auto-Distillation (1 Dirty -> 1 Clean every 30s per unit)
+      if (pCount > 0 && inventoryRef.current.dirtyWater > 0) {
+        sim.purifierAutoTimer += dt * pCount;
+        if (sim.purifierAutoTimer >= 30) {
+          sim.purifierAutoTimer -= 30;
+          setInventory((prev) => {
+            if (prev.dirtyWater <= 0) return prev;
+            return {
+              ...prev,
+              dirtyWater: prev.dirtyWater - 1,
+              cleanWater: prev.cleanWater + 1,
+            };
+          });
+        }
+      } else {
+        sim.purifierAutoTimer = 0;
+      }
+
+      // 5. Radioactive Fallout Crater Hazard
       if (inRadiationZone) {
-        sim.health = Math.max(0, sim.health - dt * 6.5);
+        if (!invincible) {
+          sim.health = Math.max(0, sim.health - dt * 6.5);
+        }
         sim.geigerTimer += dt;
         if (sim.geigerTimer >= 0.16) {
           sim.geigerTimer = 0;
@@ -554,11 +976,16 @@ export default function App() {
         sim.geigerTimer = 0;
       }
 
-      // Check Lose Condition (Health <= 0)
-      if (sim.health <= 0) {
+      // Check Lose Condition
+      if (sim.health <= 0 && !invincible) {
         setHealth(0);
+        setFinalDaysSurvived(
+          Math.max(1, Math.ceil(sim.elapsedSec / SECONDS_PER_DAY))
+        );
         if (inRadiationZone) {
           setDeathCause('radiation');
+        } else if (exposedToAcidRain && sim.hunger > 0 && sim.thirst > 0) {
+          setDeathCause('acid_rain');
         } else if (sim.thirst <= 0) {
           setDeathCause('dehydration');
         } else {
@@ -568,10 +995,10 @@ export default function App() {
         return;
       }
 
-      // 4. Hydroponic Farm Self-Sustainment Loop (+1 Canned Food every 60s per farm)
+      // 6. Hydroponic Farm Loop
       const farmCount = structuresRef.current.farmCount;
       if (farmCount > 0) {
-        sim.farmTimer += dt;
+        sim.farmTimer += dt * weatherSpec.farmSpeedMult;
         if (sim.farmTimer >= 60) {
           sim.farmTimer -= 60;
           setInventory((prev) => ({
@@ -585,19 +1012,30 @@ export default function App() {
         }
       }
 
-      // 5. Throttle HUD React state updates (~8 times/sec) for zero UI jank
+      // 7. Throttle HUD state sync (~10 Hz)
       sim.hudSyncTimer += dt;
-      if (sim.hudSyncTimer >= 0.12) {
+      if (sim.hudSyncTimer >= 0.1) {
         sim.hudSyncTimer = 0;
         setDaysRemaining(remaining);
         setDayProgress((sim.elapsedSec % SECONDS_PER_DAY) / SECONDS_PER_DAY);
         setHealth(sim.health);
         setHunger(sim.hunger);
         setThirst(sim.thirst);
-        setAltitude(sim.altitude);
+        setTelemetry({
+          x: px,
+          y: py,
+          z: pz,
+          yaw: pyaw,
+          stamina: pstamina,
+        });
         setInRadiation(sim.inRadiation);
-        if (farmCount > 0) {
-          setStructures((prev) => ({ ...prev, farmTimerSec: sim.farmTimer }));
+        setIsAcidRainExposed(sim.acidRainExposed);
+        if (farmCount > 0 || pCount > 0) {
+          setStructures((prev) => ({
+            ...prev,
+            farmTimerSec: sim.farmTimer,
+            purifierAutoTimerSec: sim.purifierAutoTimer,
+          }));
         }
       }
     },
@@ -612,20 +1050,38 @@ export default function App() {
     });
   }, []);
 
-  const daysElapsedForReport = Math.min(
-    INITIAL_DAYS,
-    Math.floor(simRef.current.elapsedSec / SECONDS_PER_DAY) +
-      (victoryMethod === 'flare' ? 1 : 0)
+  const issueTeleport = useCallback(
+    (x: number, z: number, label: string) => {
+      setTeleportCommand((prev) => ({
+        nonce: (prev?.nonce ?? 0) + 1,
+        x,
+        z,
+      }));
+      if (phase !== GamePhase.Playing) {
+        setPhase(GamePhase.Playing);
+      }
+      pushToast(`Teleported to ${label}`, 'positive');
+    },
+    [phase, pushToast]
   );
+
+  const allLoreIds = useMemo(() => LORE_LOGS.map((l) => l.id), []);
 
   return (
     <main className="relative w-full h-full overflow-hidden bg-stone-950">
       <WastelandScene
         sessionId={sessionId}
         phase={phase}
+        weather={weather}
+        elapsedSecRef={elapsedSecRef}
+        scavengeBurstRef={scavengeBurstRef}
+        adminSpeedMult={speedBoost ? 2.5 : 1.0}
+        teleportCommand={teleportCommand}
         nodesRef={nodesRef}
         hazards={hazards}
         structures={structures}
+        discoveredLoreIds={discoveredLoreIds}
+        flareUnlocked={flareUnlocked}
         hasSignalFlare={inventory.signalFlare}
         flareLaunching={flareLaunching}
         onFrameTick={handleFrameTick}
@@ -640,19 +1096,27 @@ export default function App() {
       {phase === GamePhase.Playing && (
         <GameHUD
           difficulty={difficulty}
+          weather={weather}
           daysRemaining={daysRemaining}
           dayProgress={dayProgress}
           health={health}
           hunger={hunger}
           thirst={thirst}
-          altitude={altitude}
+          telemetry={telemetry}
           inRadiation={inRadiation}
+          isAcidRainExposed={isAcidRainExposed}
           inventory={inventory}
+          flareUnlocked={flareUnlocked}
           structures={structures}
+          hazards={hazards}
+          terminals={terminalsSnapshot}
+          discoveredLoreIds={discoveredLoreIds}
+          totalLoreCount={LORE_LOGS.length}
           nearbyPrompt={nearbyPrompt}
           toasts={toasts}
           muted={muted}
           onToggleMute={handleToggleMute}
+          onOpenJournal={() => setJournalOpen(true)}
           onConsumeFood={handleConsumeFood}
           onConsumeWater={handleConsumeWater}
           onBuildShelter={handleBuildShelter}
@@ -660,21 +1124,178 @@ export default function App() {
           onPurifyWater={handlePurifyWater}
           onBuildFarm={handleBuildFarm}
           onCraftFlare={handleCraftFlare}
-          onActivateFlare={() => triggerFlareExtraction(altitude)}
+          onActivateFlare={() => triggerFlareExtraction(telemetry.y)}
         />
       )}
+
+      <LoreModal
+        open={journalOpen && phase === GamePhase.Playing}
+        onClose={() => setJournalOpen(false)}
+        discoveredLoreIds={discoveredLoreIds}
+      />
 
       {(phase === GamePhase.Victory || phase === GamePhase.GameOver) && (
         <EndScreens
           phase={phase}
           difficulty={difficulty}
-          daysElapsed={daysElapsedForReport}
+          daysElapsed={finalDaysSurvived}
+          logsRecovered={discoveredLoreIds.length}
+          totalLogs={LORE_LOGS.length}
           victoryMethod={victoryMethod}
           deathCause={deathCause}
           onRetrySameDifficulty={() => startNewRun(difficulty)}
           onReturnToMenu={() => setPhase(GamePhase.Menu)}
         />
       )}
+
+      <AdminPanel
+        open={adminOpen}
+        onClose={() => setAdminOpen(false)}
+        weather={weather}
+        weatherLocked={weatherLocked}
+        godMode={godMode}
+        speedBoost={speedBoost}
+        difficulty={difficulty}
+        daysRemaining={daysRemaining}
+        flareUnlocked={
+          flareUnlocked ||
+          inventory.signalFlare ||
+          (inventory.scrapMetal >= 100 && inventory.chemicals >= 1)
+        }
+        logsCount={discoveredLoreIds.length}
+        totalLogs={LORE_LOGS.length}
+        onSetWeather={(w) => {
+          weatherRef.current = w;
+          setWeather(w);
+          setWeatherLocked(true);
+          if (w === WeatherType.AcidRain || w === WeatherType.AshStorm) {
+            soundFX.playWeatherRumble();
+          }
+          pushToast(
+            `Admin forced weather: ${WEATHER_CATALOG[w].label}`,
+            'positive'
+          );
+        }}
+        onToggleWeatherLock={() => setWeatherLocked((prev) => !prev)}
+        onToggleGodMode={() => setGodMode((prev) => !prev)}
+        onToggleSpeedBoost={() => setSpeedBoost((prev) => !prev)}
+        onGrantFlareMaterials={() => {
+          setInventory((prev) => ({
+            ...prev,
+            scrapMetal: prev.scrapMetal + 100,
+            chemicals: prev.chemicals + 1,
+          }));
+          pushToast('Granted +100 Scrap Metal & +1 Chemicals', 'rare');
+        }}
+        onGrantAllResources={() => {
+          setInventory((prev) => ({
+            ...prev,
+            scrapMetal: prev.scrapMetal + 50,
+            wood: prev.wood + 50,
+            cannedFood: prev.cannedFood + 50,
+            dirtyWater: prev.dirtyWater + 50,
+            cleanWater: prev.cleanWater + 50,
+            chemicals: prev.chemicals + 5,
+          }));
+          pushToast('Granted +50 of all survival resources', 'positive');
+        }}
+        onUnlockAllLore={() => {
+          setDiscoveredLoreIds(allLoreIds);
+          soundFX.playLoreTerminal();
+          pushToast('Unlocked all 12 Sector 09 Field Logs [J]', 'rare');
+        }}
+        onClearResources={() => {
+          setInventory({
+            scrapMetal: 0,
+            wood: 0,
+            cannedFood: 0,
+            dirtyWater: 0,
+            cleanWater: 0,
+            chemicals: 0,
+            signalFlare: false,
+          });
+          setFlareUnlocked(false);
+          pushToast('Cleared inventory & hid Signal Flare option', 'neutral');
+        }}
+        onRefillVitals={() => {
+          simRef.current.health = 100;
+          simRef.current.hunger = 100;
+          simRef.current.thirst = 100;
+          simRef.current.starveDehydrateTimer = 0;
+          setHealth(100);
+          setHunger(100);
+          setThirst(100);
+          pushToast('Restored Health, Hunger & Thirst to 100', 'positive');
+        }}
+        onSetStarving={() => {
+          simRef.current.hunger = 0;
+          setHunger(0);
+          pushToast('Set Hunger to 0', 'warning');
+        }}
+        onSetDehydrated={() => {
+          simRef.current.thirst = 0;
+          setThirst(0);
+          pushToast('Set Thirst to 0', 'warning');
+        }}
+        onSkipDays={(days) => {
+          simRef.current.elapsedSec += days * SECONDS_PER_DAY;
+          elapsedSecRef.current = simRef.current.elapsedSec;
+          const passed = Math.floor(
+            simRef.current.elapsedSec / SECONDS_PER_DAY
+          );
+          const rem = Math.max(0, INITIAL_DAYS - passed);
+          setDaysRemaining(rem);
+          pushToast(`Skipped forward ${days} days (${rem} remaining)`, 'neutral');
+        }}
+        onSetDifficulty={(d) => {
+          setDifficulty(d);
+          if (d === Difficulty.Easy) {
+            simRef.current.hunger = 100;
+            simRef.current.thirst = 100;
+            setHunger(100);
+            setThirst(100);
+          }
+          pushToast(`Switched difficulty to ${d}`, 'positive');
+        }}
+        onTeleportBase={() => issueTeleport(0, 2, 'Base Camp')}
+        onTeleportSpire={() =>
+          issueTeleport(
+            SPIRE_DECK.padX - 1.2,
+            SPIRE_DECK.padZ,
+            'High-Altitude Overpass Spire (7.4m)'
+          )
+        }
+        onTeleportCrater={() => {
+          if (hazards.length > 0) {
+            issueTeleport(hazards[0].x, hazards[0].z, 'Radioactive Crater');
+          }
+        }}
+        onBuildAllStructures={() => {
+          setStructures((prev) => ({
+            ...prev,
+            shelter: true,
+            purifierCount: 2,
+            farmCount: 3,
+          }));
+          soundFX.playBuild();
+          pushToast(
+            'Constructed Shelter, 2 Water Purifiers & 3 Hydroponic Farms',
+            'positive'
+          );
+        }}
+        onResetScavengeCooldowns={() => {
+          nodesRef.current.forEach((n) => {
+            n.cooldownRemaining = 0;
+          });
+          pushToast('Reset all world scavenging node cooldowns', 'positive');
+        }}
+        onForceVictory={() => {
+          setAdminOpen(false);
+          setFinalDaysSurvived(INITIAL_DAYS);
+          setVictoryMethod('countdown');
+          setPhase(GamePhase.Victory);
+        }}
+      />
     </main>
   );
 }

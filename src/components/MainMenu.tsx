@@ -1,4 +1,5 @@
 import React from 'react';
+import { SECTOR_LORE_SUMMARY } from '../data/lore';
 import { Difficulty } from '../types/game';
 
 interface MainMenuProps {
@@ -15,8 +16,8 @@ const DIFFICULTY_OPTIONS: {
   {
     id: Difficulty.Easy,
     title: 'Easy',
-    subtitle: 'Exploration & Base Building',
-    decayNote: 'Hunger & Thirst decay disabled · Locked at 100',
+    subtitle: 'Exploration & Settlement Building',
+    decayNote: 'Hunger & Thirst locked at 100 · Explore & scavenge freely',
     accentClass:
       'hover:border-lime-500/70 focus-visible:ring-lime-500/70 group-hover:text-lime-300',
   },
@@ -24,7 +25,7 @@ const DIFFICULTY_OPTIONS: {
     id: Difficulty.Normal,
     title: 'Normal',
     subtitle: 'Balanced Wasteland Survival',
-    decayNote: 'Hunger & Thirst lose 1 pt every 60s · Standard rations',
+    decayNote: 'Hunger & Thirst lose 1 pt every 60s · Standard rationing',
     accentClass:
       'hover:border-amber-500/80 focus-visible:ring-amber-500/80 group-hover:text-amber-300',
   },
@@ -32,7 +33,7 @@ const DIFFICULTY_OPTIONS: {
     id: Difficulty.Hard,
     title: 'Hard',
     subtitle: 'Relentless Scarcity',
-    decayNote: 'Hunger & Thirst lose 1 pt every 40s · Tight rationing',
+    decayNote: 'Hunger & Thirst lose 1 pt every 40s · Unforgiving weather',
     accentClass:
       'hover:border-red-500/80 focus-visible:ring-red-500/80 group-hover:text-red-300',
   },
@@ -43,12 +44,12 @@ export const MainMenu: React.FC<MainMenuProps> = ({ onSelectDifficulty }) => {
     <div className="fixed inset-0 z-20 flex items-center justify-center p-6 bg-stone-950/75">
       <div className="w-full max-w-3xl bg-stone-950/95 border border-stone-800 rounded-xl p-8 md:p-10 shadow-2xl">
         <div className="space-y-4 border-b border-stone-800/90 pb-6">
-          <div className="flex items-center gap-2 text-xs font-medium text-stone-400">
-            <span>Sector 09 Quarantine Zone</span>
+          <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-stone-400">
+            <span>{SECTOR_LORE_SUMMARY.cityTitle}</span>
             <span aria-hidden="true">·</span>
-            <span>Emergency Broadcast Active</span>
+            <span>Beacon 142.8 MHz</span>
             <span aria-hidden="true">·</span>
-            <span>60s Day Cycle</span>
+            <span>Operation Longshore</span>
           </div>
 
           <h1
@@ -59,26 +60,25 @@ export const MainMenu: React.FC<MainMenuProps> = ({ onSelectDifficulty }) => {
           </h1>
 
           <p className="text-sm md:text-base text-stone-300 leading-relaxed max-w-2xl">
-            Following the strategic exchange that turned the metropolis to ash,
-            a distant coalition broadcast confirmed a heavy recovery convoy will
-            reach your sector in{' '}
-            <span className="text-amber-400 font-semibold">500 days</span>.
-            Scavenge shattered ruins and rusted wrecks, construct a
-            self-sustaining shelter, or salvage rare{' '}
-            <span className="text-lime-400 font-semibold">Chemicals</span> and
-            scrap to fire a{' '}
-            <span className="text-red-400 font-semibold">Signal Flare</span>{' '}
-            from the North-East Overpass Spire for immediate extraction.
+            After <span className="text-stone-100 font-medium">The Seven-Minute Autumn</span>{' '}
+            reduced New Vespera to vitrified ash, Offshore Flotilla{' '}
+            <span className="text-stone-100 font-medium">Meridian</span> locked an
+            automated repeater onto 142.8 MHz: armored recovery crawlers will
+            breach Sector 09 in{' '}
+            <span className="text-amber-400 font-semibold">500 days</span> once
+            atmospheric Cobalt-60 particulates settle. Scavenge the ruins,
+            recover Civil Defense logs, weather acid rain and ash squalls, and
+            build a self-sustaining homestead to survive.
           </p>
         </div>
 
         <div className="pt-6 space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-stone-200">
               Select Survival Difficulty
             </h2>
             <span className="text-xs text-stone-400">
-              WASD / Arrows to Move · E to Scavenge
+              WASD: Move · Shift: Sprint · Space: Jump · Right-Drag: Orbit · E: Scavenge
             </span>
           </div>
 
@@ -95,7 +95,7 @@ export const MainMenu: React.FC<MainMenuProps> = ({ onSelectDifficulty }) => {
                     {opt.title}
                   </span>
                   <span className="text-xs font-medium text-amber-400 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap shrink-0">
-                    Start →
+                    Deploy →
                   </span>
                 </div>
                 <p className="text-xs font-medium text-stone-300 mb-2">

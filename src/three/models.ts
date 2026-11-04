@@ -12,6 +12,7 @@ export interface MaterialPalette {
   salvageWood: THREE.MeshStandardMaterial;
   toxicGlow: THREE.MeshStandardMaterial;
   amberBeacon: THREE.MeshStandardMaterial;
+  crtCyan: THREE.MeshStandardMaterial;
   hydroGreen: THREE.MeshStandardMaterial;
   tarpOlive: THREE.MeshStandardMaterial;
   glassCanopy: THREE.MeshPhysicalMaterial;
@@ -82,9 +83,17 @@ export function createMaterialPalette(isSoftwareGl: boolean): MaterialPalette {
     amberBeacon: new THREE.MeshStandardMaterial({
       color: 0xf59e0b,
       emissive: 0xd97706,
-      emissiveIntensity: 1.5,
+      emissiveIntensity: 1.55,
       roughness: 0.3,
       metalness: 0.2,
+      flatShading: true,
+    }),
+    crtCyan: new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0284c7,
+      emissiveIntensity: 1.35,
+      roughness: 0.22,
+      metalness: 0.3,
       flatShading: true,
     }),
     hydroGreen: new THREE.MeshStandardMaterial({
@@ -133,7 +142,7 @@ export function createMaterialPalette(isSoftwareGl: boolean): MaterialPalette {
     survivorVisor: new THREE.MeshStandardMaterial({
       color: 0x38bdf8,
       emissive: 0x0284c7,
-      emissiveIntensity: 0.8,
+      emissiveIntensity: 0.85,
       roughness: 0.2,
       metalness: 0.8,
       flatShading: true,
@@ -147,22 +156,37 @@ export function createGroundTexture(renderer: THREE.WebGLRenderer): THREE.Canvas
   canvas.height = 512;
   const ctx = canvas.getContext('2d')!;
 
-  // Gritty irradiated ash soil base
   ctx.fillStyle = '#2d2925';
   ctx.fillRect(0, 0, 512, 512);
 
-  // Subtle noise speckles & scorched ash patches
-  for (let i = 0; i < 4500; i++) {
+  // Organic ash patches & rubble grit
+  for (let i = 0; i < 5200; i++) {
     const x = Math.random() * 512;
     const y = Math.random() * 512;
-    const size = 1 + Math.random() * 3;
-    const shade = 34 + Math.floor(Math.random() * 24);
-    ctx.fillStyle = `rgb(${shade + 4}, ${shade + 1}, ${shade - 3})`;
+    const size = 1 + Math.random() * 3.2;
+    const shade = 33 + Math.floor(Math.random() * 25);
+    ctx.fillStyle = `rgb(${shade + 5}, ${shade + 1}, ${shade - 3})`;
     ctx.fillRect(x, y, size, size);
   }
 
-  // Cracked grid blocks
-  ctx.strokeStyle = 'rgba(20, 18, 16, 0.45)';
+  // Subtle fractured ground fissures
+  ctx.strokeStyle = 'rgba(18, 16, 14, 0.5)';
+  ctx.lineWidth = 1.5;
+  for (let c = 0; c < 28; c++) {
+    let cx = Math.random() * 512;
+    let cy = Math.random() * 512;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    for (let seg = 0; seg < 4; seg++) {
+      cx += (Math.random() - 0.5) * 44;
+      cy += (Math.random() - 0.5) * 44;
+      ctx.lineTo(cx, cy);
+    }
+    ctx.stroke();
+  }
+
+  // City parcel grid lines
+  ctx.strokeStyle = 'rgba(20, 18, 16, 0.38)';
   ctx.lineWidth = 2;
   for (let g = 0; g <= 512; g += 64) {
     ctx.beginPath();
@@ -186,6 +210,7 @@ export function createGroundTexture(renderer: THREE.WebGLRenderer): THREE.Canvas
 
 export interface SurvivorRig {
   group: THREE.Group;
+  bodyPivot: THREE.Group;
   leftLeg: THREE.Mesh;
   rightLeg: THREE.Mesh;
   leftArm: THREE.Mesh;
@@ -195,8 +220,10 @@ export interface SurvivorRig {
 
 export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
   const group = new THREE.Group();
+  const bodyPivot = new THREE.Group();
+  group.add(bodyPivot);
 
-  // Soft contact shadow disc
+  // Soft contact shadow disc (stays flush on surface beneath feet)
   const shadowGeo = new THREE.CircleGeometry(0.68, 16);
   shadowGeo.rotateX(-Math.PI / 2);
   const shadowMat = new THREE.MeshBasicMaterial({
@@ -209,7 +236,7 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
   shadowMesh.position.y = 0.03;
   group.add(shadowMesh);
 
-  // 1 & 2: Left & Right Legs (pivoted near hip)
+  // 1 & 2: Left & Right Legs
   const legGeo = new THREE.BoxGeometry(0.24, 0.68, 0.26);
   legGeo.translate(0, -0.34, 0);
   const leftLeg = new THREE.Mesh(legGeo, mats.concreteDark);
@@ -219,7 +246,7 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
   const rightLeg = new THREE.Mesh(legGeo, mats.concreteDark);
   rightLeg.position.set(0.17, 0.68, 0);
   rightLeg.castShadow = true;
-  group.add(leftLeg, rightLeg);
+  bodyPivot.add(leftLeg, rightLeg);
 
   // 3: Hazmat / Scavenger Trench Torso
   const torso = new THREE.Mesh(
@@ -228,7 +255,7 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
   );
   torso.position.set(0, 1.05, 0);
   torso.castShadow = true;
-  group.add(torso);
+  bodyPivot.add(torso);
 
   // 4 & 5: Left & Right Arms
   const armGeo = new THREE.BoxGeometry(0.2, 0.62, 0.22);
@@ -240,7 +267,7 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
   const rightArm = new THREE.Mesh(armGeo, mats.survivorCoat);
   rightArm.position.set(0.45, 1.36, 0);
   rightArm.castShadow = true;
-  group.add(leftArm, rightArm);
+  bodyPivot.add(leftArm, rightArm);
 
   // 6: Heavy Scavenger Backpack + Bedroll
   const pack = new THREE.Mesh(
@@ -249,7 +276,7 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
   );
   pack.position.set(0, 1.1, -0.32);
   pack.castShadow = true;
-  group.add(pack);
+  bodyPivot.add(pack);
 
   const bedroll = new THREE.Mesh(
     new THREE.CylinderGeometry(0.12, 0.12, 0.58, 8),
@@ -257,7 +284,7 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
   );
   bedroll.rotation.z = Math.PI / 2;
   bedroll.position.set(0, 1.48, -0.32);
-  group.add(bedroll);
+  bodyPivot.add(bedroll);
 
   // 7: Hooded Head
   const head = new THREE.Mesh(
@@ -266,7 +293,7 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
   );
   head.position.set(0, 1.68, 0.02);
   head.castShadow = true;
-  group.add(head);
+  bodyPivot.add(head);
 
   // 8: Gas Mask Visor & Twin Filter Canisters
   const visor = new THREE.Mesh(
@@ -274,7 +301,7 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
     mats.survivorVisor
   );
   visor.position.set(0, 1.68, 0.24);
-  group.add(visor);
+  bodyPivot.add(visor);
 
   const filterGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.14, 6);
   filterGeo.rotateX(Math.PI / 2);
@@ -282,7 +309,7 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
   filterL.position.set(-0.14, 1.56, 0.26);
   const filterR = new THREE.Mesh(filterGeo, mats.darkSteel);
   filterR.position.set(0.14, 1.56, 0.26);
-  group.add(filterL, filterR);
+  bodyPivot.add(filterL, filterR);
 
   // 9: Shoulder Lantern + Subtle Warm Light
   const lanternBulb = new THREE.Mesh(
@@ -290,13 +317,182 @@ export function createSurvivorRig(mats: MaterialPalette): SurvivorRig {
     mats.amberBeacon
   );
   lanternBulb.position.set(0.32, 1.48, 0.22);
-  group.add(lanternBulb);
+  bodyPivot.add(lanternBulb);
 
-  const lanternLight = new THREE.PointLight(0xffb454, 1.4, 11, 1.8);
+  const lanternLight = new THREE.PointLight(0xffb454, 1.4, 12, 1.8);
   lanternLight.position.set(0.3, 2.1, 0.4);
-  group.add(lanternLight);
+  bodyPivot.add(lanternLight);
 
-  return { group, leftLeg, rightLeg, leftArm, rightArm, lanternLight };
+  return {
+    group,
+    bodyPivot,
+    leftLeg,
+    rightLeg,
+    leftArm,
+    rightArm,
+    lanternLight,
+  };
+}
+
+export function createCivilDefenseTerminal(mats: MaterialPalette): THREE.Group {
+  const group = new THREE.Group();
+
+  // 1: Octagonal Concrete Plinth
+  const plinth = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.75, 0.88, 0.26, 8),
+    mats.concreteMid
+  );
+  plinth.position.y = 0.13;
+  plinth.receiveShadow = true;
+  group.add(plinth);
+
+  // 2: Olive Armored Relay Cabinet
+  const cabinet = new THREE.Mesh(
+    new THREE.BoxGeometry(0.92, 1.55, 0.68),
+    mats.tarpOlive
+  );
+  cabinet.position.y = 0.26 + 0.775;
+  cabinet.castShadow = true;
+  cabinet.receiveShadow = true;
+  group.add(cabinet);
+
+  // 3: Sloped Console Hood
+  const hood = new THREE.Mesh(
+    new THREE.BoxGeometry(0.98, 0.32, 0.78),
+    mats.darkSteel
+  );
+  hood.position.set(0, 1.88, 0.04);
+  hood.rotation.x = 0.15;
+  hood.castShadow = true;
+  group.add(hood);
+
+  // 4: Glowing Cyan Civil Defense CRT Screen
+  const screen = new THREE.Mesh(
+    new THREE.BoxGeometry(0.66, 0.44, 0.08),
+    mats.crtCyan
+  );
+  screen.position.set(0, 1.42, 0.33);
+  group.add(screen);
+
+  // 5: Data Tape Keyboard Deck
+  const deck = new THREE.Mesh(
+    new THREE.BoxGeometry(0.74, 0.12, 0.28),
+    mats.brushedScrap
+  );
+  deck.position.set(0, 1.06, 0.4);
+  deck.rotation.x = 0.35;
+  group.add(deck);
+
+  // 6 & 7: Tall Whip Antenna + Blinking Amber Beacon
+  const whip = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.03, 0.05, 1.85, 6),
+    mats.brushedScrap
+  );
+  whip.position.set(-0.34, 2.8, -0.2);
+  group.add(whip);
+
+  const beacon = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.11, 0),
+    mats.amberBeacon
+  );
+  beacon.position.set(-0.34, 3.75, -0.2);
+  group.add(beacon);
+
+  return group;
+}
+
+export function createCampfireBrazier(mats: MaterialPalette): {
+  group: THREE.Group;
+  flameMesh: THREE.Mesh;
+  fireLight: THREE.PointLight;
+} {
+  const group = new THREE.Group();
+
+  // 1: Stone Ring Base
+  const ring = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.78, 0.9, 0.18, 8),
+    mats.concreteDark
+  );
+  ring.position.y = 0.09;
+  ring.receiveShadow = true;
+  group.add(ring);
+
+  // 2: Cut Rusted Steel Drum Brazier
+  const drum = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.46, 0.42, 0.68, 9),
+    mats.rustMetal
+  );
+  drum.position.y = 0.44;
+  drum.castShadow = true;
+  group.add(drum);
+
+  // 3: Charred Split Firewood Logs
+  const logGeo = new THREE.CylinderGeometry(0.08, 0.09, 0.62, 6);
+  const log1 = new THREE.Mesh(logGeo, mats.charredWood);
+  log1.position.set(0.06, 0.78, 0);
+  log1.rotation.set(0.5, 0.3, 0.7);
+  const log2 = new THREE.Mesh(logGeo, mats.charredWood);
+  log2.position.set(-0.06, 0.78, 0.04);
+  log2.rotation.set(-0.5, -0.2, -0.6);
+  group.add(log1, log2);
+
+  // 4: Animated Flickering Low-Poly Flame Core
+  const flameMesh = new THREE.Mesh(
+    new THREE.ConeGeometry(0.28, 0.65, 6),
+    mats.amberBeacon
+  );
+  flameMesh.position.y = 1.02;
+  group.add(flameMesh);
+
+  // 5: Warm Campfire PointLight
+  const fireLight = new THREE.PointLight(0xff8c2b, 2.5, 13, 1.8);
+  fireLight.position.set(0, 1.45, 0);
+  group.add(fireLight);
+
+  return { group, flameMesh, fireLight };
+}
+
+export function createStreetLamp(
+  mats: MaterialPalette,
+  tilted: boolean
+): THREE.Group {
+  const group = new THREE.Group();
+
+  const plinth = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.24, 0.32, 0.35, 6),
+    mats.concreteMid
+  );
+  plinth.position.y = 0.175;
+  group.add(plinth);
+
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.07, 0.11, 4.4, 6),
+    mats.darkSteel
+  );
+  pole.position.y = 2.35;
+  if (tilted) {
+    pole.rotation.z = 0.16;
+    pole.position.x = 0.32;
+  }
+  pole.castShadow = true;
+  group.add(pole);
+
+  const arm = new THREE.Mesh(
+    new THREE.BoxGeometry(1.15, 0.08, 0.1),
+    mats.darkSteel
+  );
+  arm.position.set(tilted ? 0.85 : 0.5, 4.45, 0);
+  arm.rotation.z = tilted ? -0.18 : 0.06;
+  group.add(arm);
+
+  const head = new THREE.Mesh(
+    new THREE.BoxGeometry(0.36, 0.12, 0.22),
+    mats.brushedScrap
+  );
+  head.position.set(tilted ? 1.32 : 0.98, tilted ? 4.32 : 4.46, 0);
+  group.add(head);
+
+  return group;
 }
 
 export function createRuinedBuilding(
@@ -305,7 +501,6 @@ export function createRuinedBuilding(
 ): THREE.Group {
   const group = new THREE.Group();
 
-  // 1: Cracked Concrete Foundation Plinth
   const plinth = new THREE.Mesh(
     new THREE.BoxGeometry(5.4, 0.45, 5.2),
     mats.concreteDark
@@ -315,7 +510,6 @@ export function createRuinedBuilding(
   plinth.castShadow = true;
   group.add(plinth);
 
-  // 2: Main Multi-Story Standing Wall Wing
   const heightA = 4.2 + (variant % 3) * 1.3;
   const wallA = new THREE.Mesh(
     new THREE.BoxGeometry(4.6, heightA, 1.2),
@@ -326,7 +520,6 @@ export function createRuinedBuilding(
   wallA.receiveShadow = true;
   group.add(wallA);
 
-  // 3: Perpendicular Fractured Side Wall
   const heightB = 2.8 + ((variant + 1) % 3) * 0.9;
   const wallB = new THREE.Mesh(
     new THREE.BoxGeometry(1.15, heightB, 3.8),
@@ -337,7 +530,6 @@ export function createRuinedBuilding(
   wallB.receiveShadow = true;
   group.add(wallB);
 
-  // 4: Collapsed Slanted Upper Floor Slab
   const collapsedSlab = new THREE.Mesh(
     new THREE.BoxGeometry(3.4, 0.28, 2.8),
     mats.concreteDark
@@ -348,7 +540,6 @@ export function createRuinedBuilding(
   collapsedSlab.receiveShadow = true;
   group.add(collapsedSlab);
 
-  // 5 & 6: Exposed Rusted Steel I-Beams / Rebar Spikes
   const beamGeo = new THREE.CylinderGeometry(0.08, 0.08, 2.4, 5);
   for (let i = 0; i < 3; i++) {
     const rebar = new THREE.Mesh(beamGeo, mats.rustMetal);
@@ -358,7 +549,6 @@ export function createRuinedBuilding(
     group.add(rebar);
   }
 
-  // 7: Dark Hollow Window Recesses on Facade
   const winGeo = new THREE.BoxGeometry(0.85, 1.05, 1.28);
   for (let row = 0; row < 2; row++) {
     for (let col = 0; col < 2; col++) {
@@ -368,7 +558,6 @@ export function createRuinedBuilding(
     }
   }
 
-  // 8: Interior Rubble Mound
   const rubble = new THREE.Mesh(
     new THREE.DodecahedronGeometry(1.15, 0),
     mats.concreteLight
@@ -387,8 +576,12 @@ export function createRustedVehicle(
 ): THREE.Group {
   const group = new THREE.Group();
 
-  // 1: Lower Chassis Hull
-  const bodyMat = variant === 0 ? mats.rustMetal : variant === 1 ? mats.tarpOlive : mats.concreteMid;
+  const bodyMat =
+    variant === 0
+      ? mats.rustMetal
+      : variant === 1
+      ? mats.tarpOlive
+      : mats.concreteMid;
   const hull = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.62, 3.4), bodyMat);
   hull.position.set(0, 0.56, 0);
   hull.rotation.z = variant === 2 ? 0.14 : -0.05;
@@ -396,7 +589,6 @@ export function createRustedVehicle(
   hull.receiveShadow = true;
   group.add(hull);
 
-  // 2: Cabin Roof
   const cabinLength = variant === 1 ? 2.2 : 1.65;
   const cabin = new THREE.Mesh(
     new THREE.BoxGeometry(1.52, 0.58, cabinLength),
@@ -407,7 +599,6 @@ export function createRustedVehicle(
   cabin.castShadow = true;
   group.add(cabin);
 
-  // 3: Hollowed Windshield Frame
   const glassCutout = new THREE.Mesh(
     new THREE.BoxGeometry(1.56, 0.42, cabinLength * 0.78),
     mats.rubberTire
@@ -415,7 +606,6 @@ export function createRustedVehicle(
   glassCutout.position.copy(cabin.position);
   group.add(glassCutout);
 
-  // 4: Heavy Steel Bumpers
   const bumperGeo = new THREE.BoxGeometry(1.84, 0.22, 0.25);
   const frontBumper = new THREE.Mesh(bumperGeo, mats.darkSteel);
   frontBumper.position.set(0, 0.42, 1.72);
@@ -423,7 +613,6 @@ export function createRustedVehicle(
   rearBumper.position.set(0, 0.42, -1.72);
   group.add(frontBumper, rearBumper);
 
-  // 5–8: Four Rusted Wheels
   const wheelGeo = new THREE.CylinderGeometry(0.36, 0.36, 0.26, 10);
   wheelGeo.rotateZ(Math.PI / 2);
   const wheelOffsets: [number, number][] = [
@@ -446,7 +635,6 @@ export function createRustedVehicle(
 export function createScrapPile(mats: MaterialPalette): THREE.Group {
   const group = new THREE.Group();
 
-  // 1: Ash Mound Base
   const mound = new THREE.Mesh(
     new THREE.ConeGeometry(1.45, 0.65, 7),
     mats.concreteDark
@@ -455,7 +643,6 @@ export function createScrapPile(mats: MaterialPalette): THREE.Group {
   mound.receiveShadow = true;
   group.add(mound);
 
-  // 2 & 3: Corrugated Metal Plates
   const plate1 = new THREE.Mesh(
     new THREE.BoxGeometry(1.3, 0.08, 0.95),
     mats.brushedScrap
@@ -473,7 +660,6 @@ export function createScrapPile(mats: MaterialPalette): THREE.Group {
   plate2.castShadow = true;
   group.add(plate1, plate2);
 
-  // 4: Crushed Steel Drum
   const drum = new THREE.Mesh(
     new THREE.CylinderGeometry(0.32, 0.28, 0.82, 8),
     mats.rustMetal
@@ -483,7 +669,6 @@ export function createScrapPile(mats: MaterialPalette): THREE.Group {
   drum.castShadow = true;
   group.add(drum);
 
-  // 5: Jutting Steel Pipe / Girder
   const girder = new THREE.Mesh(
     new THREE.BoxGeometry(0.18, 1.5, 0.18),
     mats.darkSteel
@@ -493,7 +678,6 @@ export function createScrapPile(mats: MaterialPalette): THREE.Group {
   girder.castShadow = true;
   group.add(girder);
 
-  // 6: Discarded Rubber Tire
   const tire = new THREE.Mesh(
     new THREE.TorusGeometry(0.34, 0.13, 6, 10),
     mats.rubberTire
@@ -508,7 +692,6 @@ export function createScrapPile(mats: MaterialPalette): THREE.Group {
 export function createDeadTimber(mats: MaterialPalette): THREE.Group {
   const group = new THREE.Group();
 
-  // 1: Root Ash Mound
   const roots = new THREE.Mesh(
     new THREE.ConeGeometry(0.95, 0.45, 6),
     mats.concreteDark
@@ -516,7 +699,6 @@ export function createDeadTimber(mats: MaterialPalette): THREE.Group {
   roots.position.y = 0.22;
   group.add(roots);
 
-  // 2: Scorched Main Trunk
   const trunk = new THREE.Mesh(
     new THREE.CylinderGeometry(0.18, 0.34, 2.7, 6),
     mats.charredWood
@@ -526,7 +708,6 @@ export function createDeadTimber(mats: MaterialPalette): THREE.Group {
   trunk.castShadow = true;
   group.add(trunk);
 
-  // 3, 4, 5: Jagged Leafless Branches
   const b1 = new THREE.Mesh(
     new THREE.CylinderGeometry(0.06, 0.14, 1.45, 5),
     mats.charredWood
@@ -543,7 +724,6 @@ export function createDeadTimber(mats: MaterialPalette): THREE.Group {
   b2.rotation.set(-0.28, 0, -0.62);
   b2.castShadow = true;
 
-  // Fallen Salvageable Log at Base
   const fallenLog = new THREE.Mesh(
     new THREE.CylinderGeometry(0.18, 0.2, 1.75, 6),
     mats.salvageWood
@@ -563,7 +743,6 @@ export function createHazardCrater(
 ): THREE.Group {
   const group = new THREE.Group();
 
-  // 1: Scorched Outer Rim Ring
   const rim = new THREE.Mesh(
     new THREE.RingGeometry(radius * 0.76, radius * 1.08, 14),
     mats.concreteDark
@@ -572,7 +751,6 @@ export function createHazardCrater(
   rim.position.y = 0.04;
   group.add(rim);
 
-  // 2: Glowing Radioactive Pool Surface
   const pool = new THREE.Mesh(
     new THREE.CircleGeometry(radius * 0.82, 14),
     mats.toxicGlow
@@ -581,7 +759,6 @@ export function createHazardCrater(
   pool.position.y = 0.06;
   group.add(pool);
 
-  // 3 & 4: Jagged Crater Rocks + Leaking Toxic Barrel
   for (let i = 0; i < 4; i++) {
     const angle = (i / 4) * Math.PI * 2 + 0.3;
     const rock = new THREE.Mesh(
@@ -611,7 +788,6 @@ export function createHazardCrater(
 export function createShelterStructure(mats: MaterialPalette): THREE.Group {
   const group = new THREE.Group();
 
-  // 1: Reinforced Timber & Concrete Deck
   const foundation = new THREE.Mesh(
     new THREE.BoxGeometry(4.4, 0.35, 3.8),
     mats.concreteMid
@@ -621,7 +797,6 @@ export function createShelterStructure(mats: MaterialPalette): THREE.Group {
   foundation.castShadow = true;
   group.add(foundation);
 
-  // 2: Main Bunker Cabin Walls
   const cabin = new THREE.Mesh(
     new THREE.BoxGeometry(3.6, 2.2, 3.0),
     mats.salvageWood
@@ -631,9 +806,8 @@ export function createShelterStructure(mats: MaterialPalette): THREE.Group {
   cabin.receiveShadow = true;
   group.add(cabin);
 
-  // 3: Corrugated Sloped Steel Roof
   const roof = new THREE.Mesh(
-    new THREE.BoxGeometry(4.2, 0.22, 3.6),
+    new THREE.BoxGeometry(4.3, 0.22, 3.7),
     mats.brushedScrap
   );
   roof.position.set(0, 2.68, 0);
@@ -641,7 +815,6 @@ export function createShelterStructure(mats: MaterialPalette): THREE.Group {
   roof.castShadow = true;
   group.add(roof);
 
-  // 4: Heavy Armored Blast Door
   const door = new THREE.Mesh(
     new THREE.BoxGeometry(0.95, 1.65, 0.16),
     mats.darkSteel
@@ -649,7 +822,6 @@ export function createShelterStructure(mats: MaterialPalette): THREE.Group {
   door.position.set(0, 1.18, 1.54);
   group.add(door);
 
-  // 5: Stove Pipe Chimney
   const chimney = new THREE.Mesh(
     new THREE.CylinderGeometry(0.14, 0.16, 1.4, 8),
     mats.rustMetal
@@ -658,7 +830,6 @@ export function createShelterStructure(mats: MaterialPalette): THREE.Group {
   chimney.castShadow = true;
   group.add(chimney);
 
-  // 6 & 7: Warm Porch Beacon & PointLight
   const porchLantern = new THREE.Mesh(
     new THREE.OctahedronGeometry(0.16, 0),
     mats.amberBeacon
@@ -676,7 +847,6 @@ export function createShelterStructure(mats: MaterialPalette): THREE.Group {
 export function createPurifierStructure(mats: MaterialPalette): THREE.Group {
   const group = new THREE.Group();
 
-  // 1: Steel Base Plate
   const base = new THREE.Mesh(
     new THREE.CylinderGeometry(1.15, 1.25, 0.24, 8),
     mats.concreteDark
@@ -685,7 +855,6 @@ export function createPurifierStructure(mats: MaterialPalette): THREE.Group {
   base.receiveShadow = true;
   group.add(base);
 
-  // 2: Boiler Firebox Drum
   const boiler = new THREE.Mesh(
     new THREE.CylinderGeometry(0.55, 0.58, 1.1, 10),
     mats.rustMetal
@@ -694,7 +863,6 @@ export function createPurifierStructure(mats: MaterialPalette): THREE.Group {
   boiler.castShadow = true;
   group.add(boiler);
 
-  // 3: Elevated Filtration Column
   const filterTank = new THREE.Mesh(
     new THREE.CylinderGeometry(0.42, 0.42, 1.65, 10),
     mats.brushedScrap
@@ -703,7 +871,6 @@ export function createPurifierStructure(mats: MaterialPalette): THREE.Group {
   filterTank.castShadow = true;
   group.add(filterTank);
 
-  // 4: Condenser Cross Pipe
   const pipe = new THREE.Mesh(
     new THREE.CylinderGeometry(0.08, 0.08, 0.9, 6),
     mats.darkSteel
@@ -712,7 +879,6 @@ export function createPurifierStructure(mats: MaterialPalette): THREE.Group {
   pipe.position.set(0.05, 1.55, -0.05);
   group.add(pipe);
 
-  // 5: Clean Water Reservoir Carboy
   const cleanTank = new THREE.Mesh(
     new THREE.CylinderGeometry(0.34, 0.34, 0.78, 10),
     mats.survivorVisor
@@ -726,7 +892,6 @@ export function createPurifierStructure(mats: MaterialPalette): THREE.Group {
 export function createFarmStructure(mats: MaterialPalette): THREE.Group {
   const group = new THREE.Group();
 
-  // 1: Raised Timber Planter Box
   const planter = new THREE.Mesh(
     new THREE.BoxGeometry(3.2, 0.55, 2.2),
     mats.salvageWood
@@ -736,7 +901,6 @@ export function createFarmStructure(mats: MaterialPalette): THREE.Group {
   planter.receiveShadow = true;
   group.add(planter);
 
-  // 2: Rich Soil Bed
   const soil = new THREE.Mesh(
     new THREE.BoxGeometry(2.95, 0.12, 1.95),
     mats.charredWood
@@ -744,7 +908,6 @@ export function createFarmStructure(mats: MaterialPalette): THREE.Group {
   soil.position.y = 0.56;
   group.add(soil);
 
-  // 3–5: Rows of Lush Hydroponic Crops
   const cropGeo = new THREE.DodecahedronGeometry(0.24, 0);
   for (let r = -1; r <= 1; r++) {
     for (let c = -2; c <= 2; c++) {
@@ -755,7 +918,6 @@ export function createFarmStructure(mats: MaterialPalette): THREE.Group {
     }
   }
 
-  // 6: Translucent Hydroponic Dome Canopy
   const dome = new THREE.Mesh(
     new THREE.CylinderGeometry(1.05, 1.05, 3.05, 8, 1, false, 0, Math.PI),
     mats.glassCanopy
@@ -766,7 +928,6 @@ export function createFarmStructure(mats: MaterialPalette): THREE.Group {
   dome.renderOrder = 2;
   group.add(dome);
 
-  // 7: Overhead Grow-Light Strip
   const growBar = new THREE.Mesh(
     new THREE.BoxGeometry(2.6, 0.08, 0.14),
     mats.amberBeacon
@@ -780,7 +941,7 @@ export function createFarmStructure(mats: MaterialPalette): THREE.Group {
 export function createHighAltitudeSpire(mats: MaterialPalette): THREE.Group {
   const group = new THREE.Group();
 
-  // 1: Sloped Highway Overpass Ramp (exact match to SPIRE_RAMP math)
+  // 1: Sloped Highway Overpass Ramp + Concrete Jersey Guardrails
   const dx = SPIRE_RAMP.endX - SPIRE_RAMP.startX;
   const dy = SPIRE_RAMP.topY;
   const rampLength = Math.hypot(dx, dy);
@@ -799,6 +960,20 @@ export function createHighAltitudeSpire(mats: MaterialPalette): THREE.Group {
   rampSlab.receiveShadow = true;
   rampSlab.castShadow = true;
   group.add(rampSlab);
+
+  // North & South Concrete Guardrail Curbs along Ramp
+  const railGeo = new THREE.BoxGeometry(rampLength - 1.2, 0.58, 0.32);
+  [-1, 1].forEach((side) => {
+    const rail = new THREE.Mesh(railGeo, mats.concreteLight);
+    rail.position.set(
+      (SPIRE_RAMP.startX + SPIRE_RAMP.endX) / 2 + 0.4,
+      dy / 2 + 0.25,
+      SPIRE_RAMP.centerZ + side * (SPIRE_RAMP.halfWidth - 0.16)
+    );
+    rail.rotation.z = rampAngle;
+    rail.castShadow = true;
+    group.add(rail);
+  });
 
   // Ramp Support Pillars
   for (let i = 1; i <= 3; i++) {
@@ -837,13 +1012,46 @@ export function createHighAltitudeSpire(mats: MaterialPalette): THREE.Group {
   deckTopCap.receiveShadow = true;
   group.add(deckTopCap);
 
+  // Intact North & South Jersey Barriers on Deck
+  const deckBarrierNS = new THREE.BoxGeometry(deckW, 0.72, 0.35);
+  const northBarrier = new THREE.Mesh(deckBarrierNS, mats.concreteMid);
+  northBarrier.position.set(
+    deckCenterX,
+    SPIRE_DECK.topY + 0.36,
+    SPIRE_DECK.minZ + 0.18
+  );
+  const southBarrier = new THREE.Mesh(deckBarrierNS, mats.concreteMid);
+  southBarrier.position.set(
+    deckCenterX,
+    SPIRE_DECK.topY + 0.36,
+    SPIRE_DECK.maxZ - 0.18
+  );
+  group.add(northBarrier, southBarrier);
+
+  // Fractured Rebar along Sheared Eastern Overpass Edge (warns of 7.4m drop!)
+  const eastRebarGeo = new THREE.CylinderGeometry(0.06, 0.06, 1.4, 5);
+  for (let r = -3; r <= 3; r++) {
+    const rebar = new THREE.Mesh(eastRebarGeo, mats.rustMetal);
+    rebar.rotation.z = Math.PI / 2 + (r % 2) * 0.12;
+    rebar.position.set(
+      SPIRE_DECK.maxX + 0.55,
+      SPIRE_DECK.topY - 0.22,
+      deckCenterZ + r * 1.25
+    );
+    group.add(rebar);
+  }
+
   // 3: Tall Broadcast Lattice Spire on Corner of Deck
   const towerBaseY = SPIRE_DECK.topY;
   const mast = new THREE.Mesh(
     new THREE.CylinderGeometry(0.18, 0.85, 11.5, 6),
     mats.rustMetal
   );
-  mast.position.set(SPIRE_DECK.maxX - 1.8, towerBaseY + 5.75, SPIRE_DECK.minZ + 1.8);
+  mast.position.set(
+    SPIRE_DECK.maxX - 1.8,
+    towerBaseY + 5.75,
+    SPIRE_DECK.minZ + 1.8
+  );
   mast.castShadow = true;
   group.add(mast);
 

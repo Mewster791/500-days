@@ -6,15 +6,26 @@ import {
   GamePhase,
   HazardZone,
   NearbyPrompt,
+  SECONDS_PER_DAY,
+  TeleportCommand,
+  WEATHER_CATALOG,
+  WeatherType,
   WorldNode,
 } from '../types/game';
+import { soundFX } from '../utils/audio';
+import {
+  createInitialPhysicsState,
+  stepCharacterPhysics,
+} from '../utils/physics';
 import {
   BASE_CAMP_SPOTS,
   WORLD_BOUNDS,
   getSurfaceHeight,
-  isPositionBlockedBySpireWalls,
+  isConcreteSurface,
 } from '../utils/worldGen';
 import {
+  createCampfireBrazier,
+  createCivilDefenseTerminal,
   createDeadTimber,
   createFarmStructure,
   createGroundTexture,
@@ -26,13 +37,14 @@ import {
   createRustedVehicle,
   createScrapPile,
   createShelterStructure,
+  createStreetLamp,
   createSurvivorRig,
 } from './models';
 
 // Pre-allocated math helpers outside the render loop (Zero GC)
 const _moveDir = new THREE.Vector3();
-const _isoForward = new THREE.Vector3(-1, 0, -1).normalize();
-const _isoRight = new THREE.Vector3(1, 0, -1).normalize();
+const _camForward = new THREE.Vector3();
+const _camRight = new THREE.Vector3();
 const _camDesired = new THREE.Vector3();
 const _lookTarget = new THREE.Vector3();
 const _daySunColor = new THREE.Color(0xffe1b5);
@@ -41,8 +53,12 @@ const _nightSunColor = new THREE.Color(0x475569);
 const _dayFogColor = new THREE.Color(0x413c35);
 const _duskFogColor = new THREE.Color(0x362822);
 const _nightFogColor = new THREE.Color(0x16181d);
+const _acidTint = new THREE.Color(0x2f3b26);
+const _ashTint = new THREE.Color(0x34312e);
+const _heatTint = new THREE.Color(0x5c3a21);
 const _workColor = new THREE.Color();
 const _workColor2 = new THREE.Color();
+const _debrisDummy = new THREE.Object3D();
 
 const isSoftwareGl = (() => {
   if (typeof document === 'undefined') return false;
@@ -55,12 +71,38 @@ const isSoftwareGl = (() => {
   return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
 })();
 
+interface DebrisParticle {
+  active: boolean;
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  rx: number;
+  ry: number;
+  vSpin: number;
+  scale: number;
+  life: number;
+  maxLife: number;
+}
+
 interface WastelandSceneProps {
   sessionId: number;
   phase: GamePhase;
+  weather: WeatherType;
+  elapsedSecRef: React.MutableRefObject<number>;
+  scavengeBurstRef: React.MutableRefObject<{
+    nonce: number;
+    nodeId: string;
+  } | null>;
+  adminSpeedMult: number;
+  teleportCommand: TeleportCommand | null;
   nodesRef: React.MutableRefObject<WorldNode[]>;
   hazards: HazardZone[];
   structures: BaseStructures;
+  discoveredLoreIds: string[];
+  flareUnlocked: boolean;
   hasSignalFlare: boolean;
   flareLaunching: boolean;
   onFrameTick: (
@@ -68,7 +110,10 @@ interface WastelandSceneProps {
     playerX: number,
     playerY: number,
     playerZ: number,
-    inRadiation: boolean
+    playerYaw: number,
+    stamina: number,
+    inRadiation: boolean,
+    fallDamage: number
   ) => void;
   onNearbyChange: (prompt: NearbyPrompt | null) => void;
   onInteractNode: (nodeId: string, playerAltitude: number) => void;
@@ -77,9 +122,16 @@ interface WastelandSceneProps {
 export const WastelandScene: React.FC<WastelandSceneProps> = ({
   sessionId,
   phase,
+  weather,
+  elapsedSecRef,
+  scavengeBurstRef,
+  adminSpeedMult,
+  teleportCommand,
   nodesRef,
   hazards,
   structures,
+  discoveredLoreIds,
+  flareUnlocked,
   hasSignalFlare,
   flareLaunching,
   onFrameTick,
@@ -88,9 +140,23 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
 }) => {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
 
-  // Mutable callback/state refs so React updates never tear down WebGL
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+
+  const weatherRef = useRef(weather);
+  weatherRef.current = weather;
+
+  const adminSpeedMultRef = useRef(adminSpeedMult);
+  adminSpeedMultRef.current = adminSpeedMult;
+
+  const teleportRef = useRef<TeleportCommand | null>(teleportCommand);
+  teleportRef.current = teleportCommand;
+
+  const discoveredLoreRef = useRef<string[]>(discoveredLoreIds);
+  discoveredLoreRef.current = discoveredLoreIds;
+
+  const flareUnlockedRef = useRef(flareUnlocked);
+  flareUnlockedRef.current = flareUnlocked;
 
   const hasFlareRef = useRef(hasSignalFlare);
   hasFlareRef.current = hasSignalFlare;
@@ -108,23 +174,29 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
   });
   callbacksRef.current = { onFrameTick, onNearbyChange, onInteractNode };
 
-  // References to dynamically toggled base structure groups inside the scene
   const baseMeshesRef = useRef<{
     shelterGroup: THREE.Group | null;
-    purifierGroup: THREE.Group | null;
-    farmGroup: THREE.Group | null;
+    campfireGroup: THREE.Group | null;
+    purifierGroups: THREE.Group[];
+    farmGroups: THREE.Group[];
   }>({
     shelterGroup: null,
-    purifierGroup: null,
-    farmGroup: null,
+    campfireGroup: null,
+    purifierGroups: [],
+    farmGroups: [],
   });
 
   // Sync built base structures visibility immediately when crafted
   useEffect(() => {
     const bm = baseMeshesRef.current;
     if (bm.shelterGroup) bm.shelterGroup.visible = structures.shelter;
-    if (bm.purifierGroup) bm.purifierGroup.visible = structures.purifierCount > 0;
-    if (bm.farmGroup) bm.farmGroup.visible = structures.farmCount > 0;
+    if (bm.campfireGroup) bm.campfireGroup.visible = structures.shelter;
+    bm.purifierGroups.forEach((grp, idx) => {
+      grp.visible = structures.purifierCount > idx;
+    });
+    bm.farmGroups.forEach((grp, idx) => {
+      grp.visible = structures.farmCount > idx;
+    });
   }, [structures.shelter, structures.purifierCount, structures.farmCount]);
 
   useEffect(() => {
@@ -153,15 +225,14 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x3a352f);
-    scene.fog = new THREE.FogExp2(0x3a352f, 0.0115);
+    const fog = new THREE.FogExp2(0x3a352f, 0.0115);
+    scene.fog = fog;
 
-    // Studio environment map for metallic scrap & visor reflections
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     const envTex = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
     scene.environment = envTex;
     pmremGenerator.dispose();
 
-    // Isometric-angle Perspective Camera (FOV 34 gives crisp low-poly isometric look with depth)
     const camera = new THREE.PerspectiveCamera(34, width / height, 0.5, 220);
     camera.position.set(22, 24, 22);
     camera.lookAt(0, 0, 0);
@@ -176,13 +247,13 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
     keyLight.castShadow = !isSoftwareGl;
     if (!isSoftwareGl) {
       keyLight.shadow.mapSize.set(2048, 2048);
-      const d = 36;
+      const d = 38;
       keyLight.shadow.camera.left = -d;
       keyLight.shadow.camera.right = d;
       keyLight.shadow.camera.top = d;
       keyLight.shadow.camera.bottom = -d;
       keyLight.shadow.camera.near = 2;
-      keyLight.shadow.camera.far = 110;
+      keyLight.shadow.camera.far = 115;
       keyLight.shadow.bias = -0.0005;
       keyLight.shadow.normalBias = 0.02;
     }
@@ -196,17 +267,19 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
     const mats = createMaterialPalette(isSoftwareGl);
     const groundTex = createGroundTexture(renderer);
 
-    // Expansive Wasteland Terrain Plane (extends well beyond playable perimeter into fog)
-    const groundGeo = new THREE.PlaneGeometry(280, 280, 48, 48);
+    // Expansive Wasteland Terrain Plane
+    const groundGeo = new THREE.PlaneGeometry(280, 280, 56, 56);
     groundGeo.rotateX(-Math.PI / 2);
     const posAttr = groundGeo.attributes.position;
     for (let i = 0; i < posAttr.count; i++) {
       const vx = posAttr.getX(i);
       const vz = posAttr.getZ(i);
-      const dist = Math.hypot(vx, vz);
-      if (dist > 13 && !(vx > 8 && vx < 40 && vz > -34 && vz < -18)) {
-        posAttr.setY(i, Math.sin(vx * 0.08) * Math.cos(vz * 0.08) * 0.18);
-      }
+      posAttr.setY(
+        i,
+        vx > 8 && vx < 40 && vz > -34 && vz < -18
+          ? 0
+          : getSurfaceHeight(vx, vz)
+      );
     }
     groundGeo.computeVertexNormals();
 
@@ -219,7 +292,7 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
     groundMesh.receiveShadow = true;
     scene.add(groundMesh);
 
-    // Cracked City Crossroads Asphalt Strips (offset Y >= 0.025 + polygonOffset to avoid Z-fighting)
+    // Cracked City Crossroads Asphalt Strips + Dashed Lane Lines
     const roadMat = new THREE.MeshStandardMaterial({
       color: 0x232220,
       roughness: 0.9,
@@ -240,23 +313,41 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
     roadNS.receiveShadow = true;
     scene.add(roadNS);
 
+    // Weathered Avenue Streetlamps along Main Crossroads
+    const lampPositions: [number, number, number][] = [
+      [-18, -4.1, 0],
+      [18, 4.1, Math.PI],
+      [-38, 4.1, Math.PI],
+      [42, -4.1, 0],
+      [-4.1, 20, Math.PI / 2],
+      [4.1, -20, -Math.PI / 2],
+      [-4.1, -42, Math.PI / 2],
+      [4.1, 44, -Math.PI / 2],
+    ];
+    lampPositions.forEach(([lx, lz, lrot], idx) => {
+      const lamp = createStreetLamp(mats, idx % 3 === 0);
+      lamp.position.set(lx, getSurfaceHeight(lx, lz), lz);
+      lamp.rotation.y = lrot;
+      scene.add(lamp);
+    });
+
     // Base Camp Clearing Marker Pad
     const campRing = new THREE.Mesh(
-      new THREE.RingGeometry(6.8, 7.15, 28),
+      new THREE.RingGeometry(7.2, 7.55, 32),
       new THREE.MeshBasicMaterial({
         color: 0xd97706,
         transparent: true,
-        opacity: 0.35,
+        opacity: 0.32,
         side: THREE.DoubleSide,
         depthWrite: false,
       })
     );
     campRing.rotation.x = -Math.PI / 2;
-    campRing.position.set(-1.0, 0.05, -6.5);
+    campRing.position.set(-0.6, 0.05, -6.5);
     scene.add(campRing);
 
     // Outer Natural Rocky Crags Perimeter via InstancedMesh (> 20 instances)
-    const cragCount = 64;
+    const cragCount = 68;
     const cragGeo = new THREE.DodecahedronGeometry(3.6, 0);
     cragGeo.translate(0, 1.4, 0);
     const cragMat = new THREE.MeshStandardMaterial({
@@ -268,20 +359,23 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
     const cragInstanced = new THREE.InstancedMesh(cragGeo, cragMat, cragCount);
     cragInstanced.castShadow = !isSoftwareGl;
     cragInstanced.receiveShadow = true;
-    const dummy = new THREE.Object3D();
     for (let i = 0; i < cragCount; i++) {
       const angle = (i / cragCount) * Math.PI * 2;
       const dist = WORLD_BOUNDS + 5.5 + (i % 3) * 2.4;
-      dummy.position.set(Math.cos(angle) * dist, -0.3, Math.sin(angle) * dist);
-      dummy.rotation.set(
+      _debrisDummy.position.set(
+        Math.cos(angle) * dist,
+        -0.3,
+        Math.sin(angle) * dist
+      );
+      _debrisDummy.rotation.set(
         (i % 5) * 0.12,
         angle + i * 0.5,
         ((i + 2) % 4) * 0.1
       );
       const s = 0.85 + (i % 5) * 0.22;
-      dummy.scale.set(s * 1.2, s * (1.1 + (i % 3) * 0.45), s);
-      dummy.updateMatrix();
-      cragInstanced.setMatrixAt(i, dummy.matrix);
+      _debrisDummy.scale.set(s * 1.2, s * (1.1 + (i % 3) * 0.45), s);
+      _debrisDummy.updateMatrix();
+      cragInstanced.setMatrixAt(i, _debrisDummy.matrix);
 
       const shade = 0.82 + (i % 4) * 0.08;
       _workColor.setRGB(0.32 * shade, 0.3 * shade, 0.27 * shade);
@@ -303,8 +397,10 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
       scene.add(crater);
     });
 
-    // Populate Scavengeable World Nodes & track their visual meshes for depleted state dimming
+    // Populate Scavengeable World Nodes & Civil Defense Terminals
     const nodeMeshMap = new Map<string, THREE.Group>();
+    const nodeShakeTimer = new Map<string, number>();
+
     nodesRef.current.forEach((node) => {
       if (
         node.kind === 'spire_pad' ||
@@ -316,7 +412,9 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
       }
 
       let meshGroup: THREE.Group;
-      if (node.kind === 'building') {
+      if (node.kind === 'terminal') {
+        meshGroup = createCivilDefenseTerminal(mats);
+      } else if (node.kind === 'building') {
         meshGroup = createRuinedBuilding(mats, node.variant);
       } else if (node.kind === 'vehicle') {
         meshGroup = createRustedVehicle(mats, node.variant);
@@ -333,7 +431,7 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
       nodeMeshMap.set(node.id, meshGroup);
     });
 
-    // Pre-create Base Camp Structures (toggled visible when crafted)
+    // Pre-create Multi-Plot Base Camp Structures
     const shelterMesh = createShelterStructure(mats);
     shelterMesh.position.set(
       BASE_CAMP_SPOTS.shelter.x,
@@ -344,32 +442,145 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
     shelterMesh.visible = structuresRef.current.shelter;
     scene.add(shelterMesh);
 
-    const purifierMesh = createPurifierStructure(mats);
-    purifierMesh.position.set(
-      BASE_CAMP_SPOTS.purifier.x,
+    const campfire = createCampfireBrazier(mats);
+    campfire.group.position.set(
+      BASE_CAMP_SPOTS.campfire.x,
       0,
-      BASE_CAMP_SPOTS.purifier.z
+      BASE_CAMP_SPOTS.campfire.z
     );
-    purifierMesh.rotation.y = BASE_CAMP_SPOTS.purifier.rotationY;
-    purifierMesh.visible = structuresRef.current.purifierCount > 0;
-    scene.add(purifierMesh);
+    campfire.group.visible = structuresRef.current.shelter;
+    scene.add(campfire.group);
 
-    const farmMesh = createFarmStructure(mats);
-    farmMesh.position.set(BASE_CAMP_SPOTS.farm.x, 0, BASE_CAMP_SPOTS.farm.z);
-    farmMesh.rotation.y = BASE_CAMP_SPOTS.farm.rotationY;
-    farmMesh.visible = structuresRef.current.farmCount > 0;
-    scene.add(farmMesh);
+    const purifierGroups = BASE_CAMP_SPOTS.purifiers.map((spot, idx) => {
+      const m = createPurifierStructure(mats);
+      m.position.set(spot.x, 0, spot.z);
+      m.rotation.y = spot.rotationY;
+      m.visible = structuresRef.current.purifierCount > idx;
+      scene.add(m);
+      return m;
+    });
+
+    const farmGroups = BASE_CAMP_SPOTS.farms.map((spot, idx) => {
+      const m = createFarmStructure(mats);
+      m.position.set(spot.x, 0, spot.z);
+      m.rotation.y = spot.rotationY;
+      m.visible = structuresRef.current.farmCount > idx;
+      scene.add(m);
+      return m;
+    });
 
     baseMeshesRef.current = {
       shelterGroup: shelterMesh,
-      purifierGroup: purifierMesh,
-      farmGroup: farmMesh,
+      campfireGroup: campfire.group,
+      purifierGroups,
+      farmGroups,
     };
 
     // Player Survivor Rig
     const survivor = createSurvivorRig(mats);
     survivor.group.position.set(0, 0, 2);
     scene.add(survivor.group);
+
+    // 3D Bouncing Physics Debris Pool (36 instanced low-poly chunks for scavenge & footstep impacts)
+    const DEBRIS_POOL_SIZE = 36;
+    const debrisGeo = new THREE.DodecahedronGeometry(0.16, 0);
+    const debrisMat = new THREE.MeshStandardMaterial({
+      color: 0x8b7e72,
+      roughness: 0.75,
+      metalness: 0.35,
+      flatShading: true,
+    });
+    const debrisInstanced = new THREE.InstancedMesh(
+      debrisGeo,
+      debrisMat,
+      DEBRIS_POOL_SIZE
+    );
+    debrisInstanced.frustumCulled = false;
+    const debrisPool: DebrisParticle[] = [];
+    for (let i = 0; i < DEBRIS_POOL_SIZE; i++) {
+      debrisPool.push({
+        active: false,
+        x: 0,
+        y: -20,
+        z: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        rx: 0,
+        ry: 0,
+        vSpin: 0,
+        scale: 0,
+        life: 0,
+        maxLife: 1,
+      });
+      _debrisDummy.position.set(0, -20, 0);
+      _debrisDummy.scale.setScalar(0);
+      _debrisDummy.updateMatrix();
+      debrisInstanced.setMatrixAt(i, _debrisDummy.matrix);
+      debrisInstanced.setColorAt(i, _workColor.setHex(0x8b7e72));
+    }
+    debrisInstanced.instanceMatrix.needsUpdate = true;
+    scene.add(debrisInstanced);
+
+    let debrisCursor = 0;
+    const spawnDebrisBurst = (
+      bx: number,
+      by: number,
+      bz: number,
+      count: number,
+      power: number,
+      tintHex: number
+    ) => {
+      for (let c = 0; c < count; c++) {
+        const p = debrisPool[debrisCursor];
+        const idx = debrisCursor;
+        debrisCursor = (debrisCursor + 1) % DEBRIS_POOL_SIZE;
+
+        const angle = Math.random() * Math.PI * 2;
+        const speed = (0.35 + Math.random() * 0.75) * power;
+        p.active = true;
+        p.x = bx + (Math.random() - 0.5) * 0.6;
+        p.y = by + 0.35 + Math.random() * 0.4;
+        p.z = bz + (Math.random() - 0.5) * 0.6;
+        p.vx = Math.cos(angle) * speed;
+        p.vy = (1.1 + Math.random() * 1.1) * power;
+        p.vz = Math.sin(angle) * speed;
+        p.rx = Math.random() * Math.PI;
+        p.ry = Math.random() * Math.PI;
+        p.vSpin = (Math.random() - 0.5) * 14;
+        p.scale = 0.55 + Math.random() * 0.75;
+        p.life = 0;
+        p.maxLife = 0.75 + Math.random() * 0.55;
+
+        debrisInstanced.setColorAt(idx, _workColor.setHex(tintHex));
+      }
+      if (debrisInstanced.instanceColor) {
+        debrisInstanced.instanceColor.needsUpdate = true;
+      }
+    };
+
+    // Dynamic 3D Weather Particle System
+    const WEATHER_PARTICLE_COUNT = 440;
+    const weatherOffsets = new Float32Array(WEATHER_PARTICLE_COUNT * 3);
+    const weatherWorldPos = new Float32Array(WEATHER_PARTICLE_COUNT * 3);
+    for (let i = 0; i < WEATHER_PARTICLE_COUNT; i++) {
+      weatherOffsets[i * 3] = (Math.random() - 0.5) * 44;
+      weatherOffsets[i * 3 + 1] = Math.random() * 18;
+      weatherOffsets[i * 3 + 2] = (Math.random() - 0.5) * 44;
+    }
+    const weatherGeo = new THREE.BufferGeometry();
+    const weatherPosAttr = new THREE.BufferAttribute(weatherWorldPos, 3);
+    weatherGeo.setAttribute('position', weatherPosAttr);
+    const weatherMat = new THREE.PointsMaterial({
+      color: 0xa3e635,
+      size: 0.22,
+      transparent: true,
+      opacity: 0.0,
+      depthWrite: false,
+    });
+    const weatherPoints = new THREE.Points(weatherGeo, weatherMat);
+    weatherPoints.frustumCulled = false;
+    scene.add(weatherPoints);
 
     // Ground Interaction Selection Ring
     const interactRing = new THREE.Mesh(
@@ -388,7 +599,7 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
     interactRing.visible = false;
     scene.add(interactRing);
 
-    // Signal Flare Rocket Projectile (activated on early rescue)
+    // Signal Flare Rocket Projectile
     const flareRocket = new THREE.Group();
     const flareCore = new THREE.Mesh(
       new THREE.SphereGeometry(0.38, 10, 10),
@@ -403,36 +614,49 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
       renderer.compile(scene, camera);
     }
 
-    // Keyboard Input State
+    // Physics & Input State
+    const physState = createInitialPhysicsState();
     const pressedKeys = new Set<string>();
+    let wantsJumpOnce = false;
     let activeNearbyId: string | null = null;
     let lastPromptSignature = '';
+    let lastHandledTeleportNonce = 0;
+    let lastHandledBurstNonce = 0;
     let walkPhase = 0;
-    let dayCycleClock = 0;
+    let menuOrbitClock = 0;
+    let cameraTrauma = 0;
+
+    // Smooth Isometric Camera Orbit & Zoom State (default 45° isometric NE view = Math.PI / 4)
+    let targetCameraYaw = Math.PI / 4;
+    let currentCameraYaw = Math.PI / 4;
     let zoomFactor = 1.0;
+    let isRightDragging = false;
+    let lastPointerX = 0;
 
     const onKeyDown = (e: KeyboardEvent) => {
       const code = e.code;
       pressedKeys.add(code);
 
+      if (phaseRef.current !== GamePhase.Playing) return;
+
+      if (code === 'Space' && !e.repeat) {
+        wantsJumpOnce = true;
+      }
+
+      if (code === 'BracketLeft') {
+        targetCameraYaw -= Math.PI / 4;
+      } else if (code === 'BracketRight') {
+        targetCameraYaw += Math.PI / 4;
+      }
+
       if (
         (code === 'KeyE' || e.key === 'e' || e.key === 'E') &&
-        !e.repeat &&
-        phaseRef.current === GamePhase.Playing
+        !e.repeat
       ) {
         if (activeNearbyId) {
-          callbacksRef.current.onInteractNode(
-            activeNearbyId,
-            survivor.group.position.y
-          );
-        } else if (
-          hasFlareRef.current &&
-          survivor.group.position.y >= 6.0
-        ) {
-          callbacksRef.current.onInteractNode(
-            'spire-flare-pad',
-            survivor.group.position.y
-          );
+          callbacksRef.current.onInteractNode(activeNearbyId, physState.y);
+        } else if (hasFlareRef.current && physState.y >= 6.0) {
+          callbacksRef.current.onInteractNode('spire-flare-pad', physState.y);
         }
       }
     };
@@ -441,12 +665,39 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
       pressedKeys.delete(e.code);
     };
 
+    const onBlur = () => {
+      pressedKeys.clear();
+      isRightDragging = false;
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.button === 2 && phaseRef.current === GamePhase.Playing) {
+        isRightDragging = true;
+        lastPointerX = e.clientX;
+      }
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!isRightDragging) return;
+      const dx = e.clientX - lastPointerX;
+      lastPointerX = e.clientX;
+      targetCameraYaw -= dx * 0.0075;
+    };
+
+    const onPointerUp = () => {
+      isRightDragging = false;
+    };
+
+    const onContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+
     const onWheel = (e: WheelEvent) => {
       if (phaseRef.current !== GamePhase.Playing) return;
       zoomFactor = THREE.MathUtils.clamp(
         zoomFactor + (e.deltaY > 0 ? 0.08 : -0.08),
-        0.72,
-        1.45
+        0.68,
+        1.48
       );
     };
 
@@ -461,10 +712,14 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointermove', onPointerMove);
+    container.addEventListener('pointerdown', onPointerDown);
+    container.addEventListener('contextmenu', onContextMenu);
     container.addEventListener('wheel', onWheel, { passive: true });
     window.addEventListener('resize', onResize);
 
-    // Continuous Game Loop with Software-WebGL fence pacing
     const clock = new THREE.Clock();
     let frameId = 0;
     let disposed = false;
@@ -490,99 +745,178 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
       if (disposed) return;
       const rawDt = clock.getDelta();
       const dt = Math.min(rawDt, 0.1);
+      const activeWeather = weatherRef.current;
+      const weatherSpec = WEATHER_CATALOG[activeWeather];
+
+      // Smoothly interpolate camera orbit yaw
+      currentCameraYaw = THREE.MathUtils.damp(
+        currentCameraYaw,
+        targetCameraYaw,
+        10,
+        dt
+      );
+
+      // Handle Admin Teleport Request immediately (resets velocity & peak fall height safely)
+      const tp = teleportRef.current;
+      if (tp && tp.nonce !== lastHandledTeleportNonce) {
+        lastHandledTeleportNonce = tp.nonce;
+        const ty = getSurfaceHeight(tp.x, tp.z);
+        physState.x = tp.x;
+        physState.y = ty;
+        physState.z = tp.z;
+        physState.vx = 0;
+        physState.vy = 0;
+        physState.vz = 0;
+        physState.grounded = true;
+        physState.peakAirY = ty;
+        survivor.group.position.set(tp.x, ty, tp.z);
+      }
+
+      // Check Scavenge Burst Event from App
+      const burst = scavengeBurstRef.current;
+      if (burst && burst.nonce !== lastHandledBurstNonce) {
+        lastHandledBurstNonce = burst.nonce;
+        const targetNode = nodesRef.current.find((n) => n.id === burst.nodeId);
+        if (targetNode) {
+          nodeShakeTimer.set(targetNode.id, 0.32);
+          const tint =
+            targetNode.kind === 'timber'
+              ? 0x6b4f35
+              : targetNode.kind === 'terminal'
+              ? 0x38bdf8
+              : 0x9ca3af;
+          spawnDebrisBurst(
+            targetNode.x,
+            targetNode.y + 0.6,
+            targetNode.z,
+            10,
+            4.6,
+            tint
+          );
+          cameraTrauma = Math.min(1, cameraTrauma + 0.18);
+        }
+      }
 
       if (phaseRef.current === GamePhase.Playing) {
-        // 1. Player Movement (Isometric WASD / Arrow Keys)
+        // 1. Compute Camera-Relative Movement Vectors from currentCameraYaw
+        _camForward.set(
+          -Math.cos(currentCameraYaw),
+          0,
+          -Math.sin(currentCameraYaw)
+        );
+        _camRight.set(
+          Math.sin(currentCameraYaw),
+          0,
+          -Math.cos(currentCameraYaw)
+        );
+
         _moveDir.set(0, 0, 0);
         if (pressedKeys.has('KeyW') || pressedKeys.has('ArrowUp')) {
-          _moveDir.add(_isoForward);
+          _moveDir.add(_camForward);
         }
         if (pressedKeys.has('KeyS') || pressedKeys.has('ArrowDown')) {
-          _moveDir.sub(_isoForward);
+          _moveDir.sub(_camForward);
         }
         if (pressedKeys.has('KeyD') || pressedKeys.has('ArrowRight')) {
-          _moveDir.add(_isoRight);
+          _moveDir.add(_camRight);
         }
         if (pressedKeys.has('KeyA') || pressedKeys.has('ArrowLeft')) {
-          _moveDir.sub(_isoRight);
+          _moveDir.sub(_camRight);
         }
-
-        const speed = 9.2;
         if (_moveDir.lengthSq() > 0.001) {
           _moveDir.normalize();
-          const curX = survivor.group.position.x;
-          const curY = survivor.group.position.y;
-          const curZ = survivor.group.position.z;
+        }
 
-          let nextX = THREE.MathUtils.clamp(
-            curX + _moveDir.x * speed * dt,
-            -WORLD_BOUNDS,
-            WORLD_BOUNDS
+        const sprinting =
+          pressedKeys.has('ShiftLeft') || pressedKeys.has('ShiftRight');
+
+        const stepRes = stepCharacterPhysics(
+          physState,
+          dt,
+          _moveDir.x,
+          _moveDir.z,
+          sprinting,
+          wantsJumpOnce,
+          activeWeather,
+          adminSpeedMultRef.current,
+          nodesRef.current,
+          structuresRef.current
+        );
+        wantsJumpOnce = false;
+
+        // Audio & Particle Feedback from Physics Events
+        if (stepRes.jumped) {
+          soundFX.playJump();
+          spawnDebrisBurst(physState.x, physState.y, physState.z, 4, 2.2, 0x78716c);
+        }
+        if (stepRes.landed) {
+          const heavy = stepRes.hardLandingDamage > 0;
+          soundFX.playLand(heavy);
+          spawnDebrisBurst(
+            physState.x,
+            physState.y,
+            physState.z,
+            heavy ? 12 : 5,
+            heavy ? 5.2 : 2.5,
+            0x78716c
           );
-          let nextZ = THREE.MathUtils.clamp(
-            curZ + _moveDir.z * speed * dt,
-            -WORLD_BOUNDS,
-            WORLD_BOUNDS
+          if (heavy) {
+            cameraTrauma = Math.min(1, cameraTrauma + 0.55);
+          }
+        }
+        if (stepRes.footstepTriggered) {
+          soundFX.playFootstep(isConcreteSurface(physState.x, physState.z));
+          spawnDebrisBurst(
+            physState.x,
+            physState.y - 0.2,
+            physState.z,
+            2,
+            1.4,
+            0x57534e
           );
+        }
 
-          // Check Spire side-wall cliff blocking
-          if (isPositionBlockedBySpireWalls(nextX, nextZ, curY)) {
-            if (!isPositionBlockedBySpireWalls(nextX, curZ, curY)) {
-              nextZ = curZ;
-            } else if (!isPositionBlockedBySpireWalls(curX, nextZ, curY)) {
-              nextX = curX;
-            } else {
-              nextX = curX;
-              nextZ = curZ;
-            }
-          }
+        // Sync Survivor 3D Rig Transform, Squash/Stretch & Limb Kinematics
+        survivor.group.position.set(physState.x, physState.y, physState.z);
+        survivor.group.rotation.y = physState.yaw;
+        const invSquash = 1 / Math.sqrt(Math.max(0.5, physState.squashY));
+        survivor.bodyPivot.scale.set(invSquash, physState.squashY, invSquash);
 
-          // Check radial collision against world nodes & built base structures
-          const nodes = nodesRef.current;
-          for (let i = 0; i < nodes.length; i++) {
-            const n = nodes[i];
-            if (n.colliderRadius <= 0) continue;
-            if (n.kind === 'shelter' && !structuresRef.current.shelter) continue;
-            if (n.kind === 'purifier' && structuresRef.current.purifierCount === 0)
-              continue;
-            if (n.kind === 'farm' && structuresRef.current.farmCount === 0)
-              continue;
-
-            const dx = nextX - n.x;
-            const dz = nextZ - n.z;
-            const dist = Math.hypot(dx, dz);
-            const minSep = n.colliderRadius + 0.55;
-            if (dist < minSep && dist > 0.0001) {
-              const push = (minSep - dist) / dist;
-              nextX += dx * push;
-              nextZ += dz * push;
-            }
-          }
-
-          const targetY = getSurfaceHeight(nextX, nextZ);
-          survivor.group.position.x = nextX;
-          survivor.group.position.z = nextZ;
-          survivor.group.position.y = THREE.MathUtils.damp(
-            curY,
-            targetY,
-            18,
+        const horizSpeed = Math.hypot(physState.vx, physState.vz);
+        if (!physState.grounded) {
+          // Airborne stride pose
+          survivor.leftLeg.rotation.x = THREE.MathUtils.damp(
+            survivor.leftLeg.rotation.x,
+            0.48,
+            14,
             dt
           );
-
-          // Smoothly rotate character toward movement direction
-          const targetAngle = Math.atan2(_moveDir.x, _moveDir.z);
-          let diff = targetAngle - survivor.group.rotation.y;
-          while (diff > Math.PI) diff -= Math.PI * 2;
-          while (diff < -Math.PI) diff += Math.PI * 2;
-          survivor.group.rotation.y += diff * Math.min(1, dt * 14);
-
-          // Walk animation swing
-          walkPhase += dt * 13;
-          const swing = Math.sin(walkPhase) * 0.55;
+          survivor.rightLeg.rotation.x = THREE.MathUtils.damp(
+            survivor.rightLeg.rotation.x,
+            -0.38,
+            14,
+            dt
+          );
+          survivor.leftArm.rotation.x = THREE.MathUtils.damp(
+            survivor.leftArm.rotation.x,
+            -0.55,
+            14,
+            dt
+          );
+          survivor.rightArm.rotation.x = THREE.MathUtils.damp(
+            survivor.rightArm.rotation.x,
+            0.55,
+            14,
+            dt
+          );
+        } else if (horizSpeed > 0.45) {
+          walkPhase += dt * (1.25 * horizSpeed);
+          const amp = Math.min(0.72, horizSpeed * 0.065);
+          const swing = Math.sin(walkPhase) * amp;
           survivor.leftLeg.rotation.x = swing;
           survivor.rightLeg.rotation.x = -swing;
-          survivor.leftArm.rotation.x = -swing * 0.75;
-          survivor.rightArm.rotation.x = swing * 0.75;
+          survivor.leftArm.rotation.x = -swing * 0.78;
+          survivor.rightArm.rotation.x = swing * 0.78;
         } else {
           survivor.leftLeg.rotation.x = THREE.MathUtils.damp(
             survivor.leftLeg.rotation.x,
@@ -610,19 +944,31 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
           );
         }
 
-        // 2. Day / Night 60-second Atmospheric Cycle
-        dayCycleClock = (dayCycleClock + dt) % 60;
-        const dayFraction = dayCycleClock / 60; // 0..1 across 1 in-game day
+        // Animate Campfire Flicker when Shelter is constructed
+        if (campfire.group.visible) {
+          const flick =
+            0.9 +
+            Math.sin(elapsedSecRef.current * 17) * 0.12 +
+            Math.cos(elapsedSecRef.current * 29) * 0.08;
+          campfire.flameMesh.scale.set(flick, 0.85 + flick * 0.25, flick);
+          campfire.fireLight.intensity = 2.2 * flick;
+        }
+
+        // 2. Unified Day / Night 60-second Atmospheric Cycle synced to elapsedSecRef
+        const dayFraction =
+          (elapsedSecRef.current % SECONDS_PER_DAY) / SECONDS_PER_DAY;
         const sunAngle = dayFraction * Math.PI * 2;
-        const daylight = Math.sin(sunAngle) * 0.5 + 0.5; // 0 (midnight) -> 1 (noon)
+        const daylight = Math.sin(sunAngle) * 0.5 + 0.5;
 
         keyLight.position.set(
-          survivor.group.position.x + Math.cos(sunAngle) * 32,
+          physState.x + Math.cos(sunAngle) * 32,
           16 + daylight * 26,
-          survivor.group.position.z + 18
+          physState.z + 18
         );
         keyLight.target.position.copy(survivor.group.position);
-        keyLight.intensity = 0.35 + daylight * 1.65;
+
+        let sunIntensity = 0.35 + daylight * 1.65;
+        let targetFogDensity = 0.0115;
 
         if (daylight > 0.45) {
           const t = (daylight - 0.45) / 0.55;
@@ -633,25 +979,161 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
           _workColor.copy(_nightSunColor).lerp(_duskSunColor, t);
           _workColor2.copy(_nightFogColor).lerp(_duskFogColor, t);
         }
+
+        if (activeWeather === WeatherType.AcidRain) {
+          _workColor2.lerp(_acidTint, 0.55);
+          sunIntensity *= 0.65;
+          targetFogDensity = 0.0175;
+        } else if (activeWeather === WeatherType.AshStorm) {
+          _workColor2.lerp(_ashTint, 0.72);
+          sunIntensity *= 0.5;
+          targetFogDensity = 0.0245;
+        } else if (activeWeather === WeatherType.Heatwave) {
+          _workColor2.lerp(_heatTint, 0.5);
+          sunIntensity *= 1.28;
+          targetFogDensity = 0.0135;
+        }
+
+        keyLight.intensity = THREE.MathUtils.damp(
+          keyLight.intensity,
+          sunIntensity,
+          4,
+          dt
+        );
+        fog.density = THREE.MathUtils.damp(
+          fog.density,
+          targetFogDensity,
+          3,
+          dt
+        );
         keyLight.color.copy(_workColor);
         (scene.background as THREE.Color).copy(_workColor2);
-        if (scene.fog) scene.fog.color.copy(_workColor2);
+        fog.color.copy(_workColor2);
         hemiLight.intensity = 0.32 + daylight * 0.52;
         survivor.lanternLight.intensity = 2.6 - daylight * 1.6;
 
-        // 3. Update Node Cooldowns & Find Nearest Interactable Node
+        // 3. Weather Particle Kinematics
+        if (activeWeather === WeatherType.Clear) {
+          weatherMat.opacity = THREE.MathUtils.damp(
+            weatherMat.opacity,
+            0.0,
+            5,
+            dt
+          );
+          weatherPoints.visible = weatherMat.opacity > 0.02;
+        } else {
+          weatherPoints.visible = true;
+          if (activeWeather === WeatherType.AcidRain) {
+            weatherMat.color.setHex(0xa3e635);
+            weatherMat.size = 0.2;
+            weatherMat.opacity = THREE.MathUtils.damp(
+              weatherMat.opacity,
+              0.72,
+              5,
+              dt
+            );
+          } else if (activeWeather === WeatherType.AshStorm) {
+            weatherMat.color.setHex(0xa8a29e);
+            weatherMat.size = 0.28;
+            weatherMat.opacity = THREE.MathUtils.damp(
+              weatherMat.opacity,
+              0.82,
+              5,
+              dt
+            );
+          } else {
+            weatherMat.color.setHex(0xfb923c);
+            weatherMat.size = 0.22;
+            weatherMat.opacity = THREE.MathUtils.damp(
+              weatherMat.opacity,
+              0.58,
+              5,
+              dt
+            );
+          }
+
+          for (let i = 0; i < WEATHER_PARTICLE_COUNT; i++) {
+            const idx = i * 3;
+            if (activeWeather === WeatherType.AcidRain) {
+              weatherOffsets[idx] -= dt * 3.5;
+              weatherOffsets[idx + 1] -= dt * 21.0;
+            } else if (activeWeather === WeatherType.AshStorm) {
+              weatherOffsets[idx] += dt * 16.5;
+              weatherOffsets[idx + 1] -= dt * 2.4;
+              weatherOffsets[idx + 2] += dt * 7.5;
+            } else {
+              weatherOffsets[idx] +=
+                Math.sin(elapsedSecRef.current * 2 + i) * dt * 1.2;
+              weatherOffsets[idx + 1] += dt * 3.2;
+            }
+
+            if (weatherOffsets[idx] > 22) weatherOffsets[idx] -= 44;
+            if (weatherOffsets[idx] < -22) weatherOffsets[idx] += 44;
+            if (weatherOffsets[idx + 2] > 22) weatherOffsets[idx + 2] -= 44;
+            if (weatherOffsets[idx + 2] < -22) weatherOffsets[idx + 2] += 44;
+            if (weatherOffsets[idx + 1] < 0) weatherOffsets[idx + 1] += 18;
+            if (weatherOffsets[idx + 1] > 18) weatherOffsets[idx + 1] -= 18;
+
+            weatherWorldPos[idx] = physState.x + weatherOffsets[idx];
+            weatherWorldPos[idx + 1] = physState.y + weatherOffsets[idx + 1];
+            weatherWorldPos[idx + 2] = physState.z + weatherOffsets[idx + 2];
+          }
+          weatherPosAttr.needsUpdate = true;
+        }
+
+        // 4. Update Bouncing 3D Debris Particles
+        let anyDebrisActive = false;
+        for (let i = 0; i < DEBRIS_POOL_SIZE; i++) {
+          const p = debrisPool[i];
+          if (!p.active) continue;
+          anyDebrisActive = true;
+          p.life += dt;
+          if (p.life >= p.maxLife) {
+            p.active = false;
+            _debrisDummy.position.set(0, -20, 0);
+            _debrisDummy.scale.setScalar(0);
+            _debrisDummy.updateMatrix();
+            debrisInstanced.setMatrixAt(i, _debrisDummy.matrix);
+            continue;
+          }
+
+          p.vy -= 22.0 * dt;
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.z += p.vz * dt;
+          p.rx += p.vSpin * dt;
+          p.ry += p.vSpin * 0.7 * dt;
+
+          const gy = getSurfaceHeight(p.x, p.z);
+          if (p.y < gy + 0.08) {
+            p.y = gy + 0.08;
+            p.vy = -p.vy * 0.44;
+            p.vx *= 0.68;
+            p.vz *= 0.68;
+          }
+
+          const fade = 1 - p.life / p.maxLife;
+          _debrisDummy.position.set(p.x, p.y, p.z);
+          _debrisDummy.rotation.set(p.rx, p.ry, 0);
+          _debrisDummy.scale.setScalar(p.scale * fade);
+          _debrisDummy.updateMatrix();
+          debrisInstanced.setMatrixAt(i, _debrisDummy.matrix);
+        }
+        if (anyDebrisActive) {
+          debrisInstanced.instanceMatrix.needsUpdate = true;
+        }
+
+        // 5. Update Node Cooldowns, Impact Shakes & Find Nearest Interactable Node
         const nodes = nodesRef.current;
         let closestNode: WorldNode | null = null;
         let closestDist = Infinity;
+        const cdMult = weatherSpec.cooldownRecoveryMult;
 
         for (let i = 0; i < nodes.length; i++) {
           const n = nodes[i];
           if (n.cooldownRemaining > 0) {
-            n.cooldownRemaining = Math.max(0, n.cooldownRemaining - dt);
-            const g = nodeMeshMap.get(n.id);
-            if (g && n.cooldownRemaining === 0) {
-              g.position.y = n.y;
-            }
+            const rate = n.kind === 'shelter' ? 1.0 : cdMult;
+            n.cooldownRemaining = Math.max(0, n.cooldownRemaining - dt * rate);
           }
 
           if (n.kind === 'shelter' && !structuresRef.current.shelter) continue;
@@ -659,26 +1141,36 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
             continue;
           if (n.kind === 'farm' && structuresRef.current.farmCount === 0)
             continue;
+          if (
+            n.kind === 'spire_pad' &&
+            !flareUnlockedRef.current &&
+            !hasFlareRef.current
+          ) {
+            continue;
+          }
 
-          const dy = Math.abs(survivor.group.position.y - n.y);
+          const dy = Math.abs(physState.y - n.y);
           if (dy > 2.2) continue;
 
-          const d = Math.hypot(
-            survivor.group.position.x - n.x,
-            survivor.group.position.z - n.z
-          );
+          const d = Math.hypot(physState.x - n.x, physState.z - n.z);
           if (d <= n.interactRadius && d < closestDist) {
             closestDist = d;
             closestNode = n;
           }
         }
 
-        // Slightly sink depleted nodes so scavenged status is readable in 3D
         nodeMeshMap.forEach((grp, id) => {
           const nd = nodes.find((item) => item.id === id);
-          if (nd && nd.cooldownRemaining > 0) {
-            grp.position.y = nd.y - 0.18;
+          if (!nd) return;
+          const shakeT = nodeShakeTimer.get(id) ?? 0;
+          if (shakeT > 0) {
+            const nextT = Math.max(0, shakeT - dt);
+            nodeShakeTimer.set(id, nextT);
+            grp.rotation.z = Math.sin(nextT * 48) * 0.08 * (nextT / 0.32);
+          } else {
+            grp.rotation.z = 0;
           }
+          grp.position.y = nd.cooldownRemaining > 0 ? nd.y - 0.16 : nd.y;
         });
 
         if (closestNode) {
@@ -693,15 +1185,32 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
           const onCd = closestNode.cooldownRemaining > 0;
           let hint = 'Press [E] to Scavenge';
           if (closestNode.kind === 'spire_pad') {
-            hint = hasFlareRef.current
-              ? 'Press [E] to Launch Signal Flare!'
-              : 'Craft Signal Flare to Call Extraction Here';
+            if (weatherSpec.blocksFlare && hasFlareRef.current) {
+              hint = 'Ash Storm blocks aerial flare visibility!';
+            } else if (hasFlareRef.current) {
+              hint = 'Press [E] to Launch Signal Flare!';
+            } else {
+              hint = 'Craft Signal Flare in Sidebar to Launch Here';
+            }
+          } else if (closestNode.kind === 'terminal') {
+            const alreadyRead =
+              closestNode.loreId &&
+              discoveredLoreRef.current.includes(closestNode.loreId);
+            if (!alreadyRead) {
+              hint = 'Press [E] to Download Archive Log & Salvage';
+            } else if (onCd) {
+              hint = `Log Archived · Capacitor recharging (${Math.ceil(
+                closestNode.cooldownRemaining
+              )}s)`;
+            } else {
+              hint = 'Press [E] to Scavenge Spare Relay Parts';
+            }
           } else if (closestNode.kind === 'purifier') {
             hint = 'Press [E] to Purify Dirty Water';
           } else if (closestNode.kind === 'shelter') {
             hint = 'Press [E] to Rest & Stabilize (+Health)';
           } else if (closestNode.kind === 'farm') {
-            hint = 'Auto-generating Canned Food every 60s';
+            hint = `Growing Canned Food (${weatherSpec.farmSpeedMult}x weather rate)`;
           } else if (onCd) {
             hint = `Salvaged · Shifting rubble (${Math.ceil(
               closestNode.cooldownRemaining
@@ -710,7 +1219,9 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
 
           const sig = `${closestNode.id}|${onCd}|${Math.ceil(
             closestNode.cooldownRemaining
-          )}|${hasFlareRef.current}`;
+          )}|${hasFlareRef.current}|${activeWeather}|${
+            discoveredLoreRef.current.length
+          }`;
           if (sig !== lastPromptSignature) {
             lastPromptSignature = sig;
             callbacksRef.current.onNearbyChange({
@@ -731,15 +1242,12 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
           }
         }
 
-        // 4. Check Radioactive Fallout Crater Hazard
+        // 6. Check Radioactive Fallout Crater Hazard
         let inRadiation = false;
-        if (survivor.group.position.y < 2.0) {
+        if (physState.y < 2.0) {
           for (let i = 0; i < hazards.length; i++) {
             const hz = hazards[i];
-            const dist = Math.hypot(
-              survivor.group.position.x - hz.x,
-              survivor.group.position.z - hz.z
-            );
+            const dist = Math.hypot(physState.x - hz.x, physState.z - hz.z);
             if (dist < hz.radius * 0.88) {
               inRadiation = true;
               break;
@@ -747,37 +1255,43 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
           }
         }
 
-        // 5. Notify Survival Simulation Loop
+        // 7. Notify Survival Simulation Loop
         callbacksRef.current.onFrameTick(
           dt,
-          survivor.group.position.x,
-          survivor.group.position.y,
-          survivor.group.position.z,
-          inRadiation
+          physState.x,
+          physState.y,
+          physState.z,
+          physState.yaw,
+          physState.stamina,
+          inRadiation,
+          stepRes.hardLandingDamage
         );
       } else {
-        // Gentle ambient camera orbit when on Main Menu / Victory / Game Over
-        dayCycleClock += dt * 0.4;
+        menuOrbitClock += dt * 0.4;
       }
 
       // Signal Flare Skyward Launch Animation
       if (flareLaunchingRef.current) {
         if (!flareRocket.visible) {
           flareRocket.visible = true;
-          flareRocket.position.set(
-            survivor.group.position.x,
-            survivor.group.position.y + 1.8,
-            survivor.group.position.z
-          );
+          flareRocket.position.set(physState.x, physState.y + 1.8, physState.z);
+          cameraTrauma = 0.45;
         }
-        flareRocket.position.y += dt * 22;
+        flareRocket.position.y += dt * 24;
       } else {
         flareRocket.visible = false;
       }
 
-      // Smoothly Damped Top-Down Isometric Tracking Camera
+      // Decay Camera Trauma & Apply Spring-Damped Orbiting Isometric Camera
+      cameraTrauma = Math.max(0, cameraTrauma - dt * 1.8);
+      const shakeAmp = cameraTrauma * cameraTrauma * 0.42;
+      const shakeX =
+        shakeAmp > 0.001 ? Math.sin(elapsedSecRef.current * 55) * shakeAmp : 0;
+      const shakeY =
+        shakeAmp > 0.001 ? Math.cos(elapsedSecRef.current * 63) * shakeAmp : 0;
+
       if (phaseRef.current === GamePhase.Menu) {
-        const menuAngle = dayCycleClock * 0.25;
+        const menuAngle = menuOrbitClock * 0.25;
         _camDesired.set(
           Math.cos(menuAngle) * 28,
           24,
@@ -786,36 +1300,33 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
         camera.position.lerp(_camDesired, 1 - Math.exp(-3 * dt));
         camera.lookAt(0, 1.5, -6);
       } else {
-        const isoDist = 21.5 * zoomFactor;
+        const horizRadius = 30.4 * zoomFactor;
         const isoHeight = 23.5 * zoomFactor;
+        const leadX = physState.vx * 0.14;
+        const leadZ = physState.vz * 0.14;
+
         _camDesired.set(
-          survivor.group.position.x + isoDist,
-          survivor.group.position.y + isoHeight,
-          survivor.group.position.z + isoDist
+          physState.x + leadX + Math.cos(currentCameraYaw) * horizRadius,
+          physState.y + isoHeight,
+          physState.z + leadZ + Math.sin(currentCameraYaw) * horizRadius
         );
-        camera.position.x = THREE.MathUtils.damp(
-          camera.position.x,
-          _camDesired.x,
-          8,
-          dt
-        );
-        camera.position.y = THREE.MathUtils.damp(
-          camera.position.y,
-          _camDesired.y,
-          8,
-          dt
-        );
+        camera.position.x =
+          THREE.MathUtils.damp(camera.position.x, _camDesired.x, 8.5, dt) +
+          shakeX;
+        camera.position.y =
+          THREE.MathUtils.damp(camera.position.y, _camDesired.y, 8.5, dt) +
+          shakeY;
         camera.position.z = THREE.MathUtils.damp(
           camera.position.z,
           _camDesired.z,
-          8,
+          8.5,
           dt
         );
 
         _lookTarget.set(
-          survivor.group.position.x,
-          survivor.group.position.y + 0.8,
-          survivor.group.position.z
+          physState.x + leadX * 0.5,
+          physState.y + 0.85,
+          physState.z + leadZ * 0.5
         );
         camera.lookAt(_lookTarget);
       }
@@ -837,6 +1348,11 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
       clearTimeout(frameId);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointermove', onPointerMove);
+      container.removeEventListener('pointerdown', onPointerDown);
+      container.removeEventListener('contextmenu', onContextMenu);
       container.removeEventListener('wheel', onWheel);
       window.removeEventListener('resize', onResize);
 
@@ -851,11 +1367,15 @@ export const WastelandScene: React.FC<WastelandSceneProps> = ({
           }
         }
       });
+      debrisGeo.dispose();
+      debrisMat.dispose();
+      weatherGeo.dispose();
+      weatherMat.dispose();
       groundTex.dispose();
       envTex.dispose();
       renderer.dispose();
     };
-  }, [sessionId, hazards, nodesRef]);
+  }, [sessionId, hazards, nodesRef, elapsedSecRef, scavengeBurstRef]);
 
   return (
     <div

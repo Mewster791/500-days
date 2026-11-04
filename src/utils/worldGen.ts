@@ -1,10 +1,10 @@
+import { LORE_LOGS } from '../data/lore';
 import { HazardZone, WorldNode } from '../types/game';
 
 export const WORLD_BOUNDS = 68;
 
 // High-Altitude Overpass Comms Spire geometry specification:
-// Located in the North-East quadrant so the player can visibly see it and climb the highway ramp.
-// Ramp runs along X from x = 10 (y = 0) up to x = 28 (y = 7.4), centered at z = -26 (width 6.4m: z in [-29.2, -22.8]).
+// Ramp runs along X from x = 10 (y = 0) up to x = 28 (y = 7.4), centered at z = -26.
 // Elevated Spire Platform sits at x in [28, 38], z in [-31, -21] at y = 7.4m.
 export const SPIRE_RAMP = {
   startX: 10,
@@ -26,12 +26,34 @@ export const SPIRE_DECK = {
 
 export const BASE_CAMP_SPOTS = {
   shelter: { x: -6.5, z: -7.5, rotationY: 0.35 },
-  purifier: { x: -1.2, z: -8.5, rotationY: -0.25 },
-  farm: { x: 4.5, z: -7.5, rotationY: 0.1 },
+  campfire: { x: -3.2, z: -4.8 },
+  purifiers: [
+    { x: -1.2, z: -8.6, rotationY: -0.25 },
+    { x: 1.4, z: -9.2, rotationY: 0.4 },
+  ],
+  farms: [
+    { x: 4.8, z: -7.5, rotationY: 0.1 },
+    { x: 5.2, z: -3.8, rotationY: -0.15 },
+    { x: 1.2, z: -4.2, rotationY: 0.25 },
+  ],
 };
 
+export function isConcreteSurface(x: number, z: number): boolean {
+  // Roads, Base Camp pad, or Overpass Spire/Ramp
+  if (Math.abs(x) < 3.4 || Math.abs(z) < 3.4) return true;
+  if (
+    x >= SPIRE_RAMP.startX &&
+    x <= SPIRE_DECK.maxX &&
+    z >= SPIRE_DECK.minZ &&
+    z <= SPIRE_DECK.maxZ
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function getSurfaceHeight(x: number, z: number): number {
-  // Check elevated spire deck
+  // Elevated spire deck
   if (
     x >= SPIRE_DECK.minX &&
     x <= SPIRE_DECK.maxX &&
@@ -41,7 +63,7 @@ export function getSurfaceHeight(x: number, z: number): number {
     return SPIRE_DECK.topY;
   }
 
-  // Check sloped overpass ramp
+  // Sloped overpass ramp
   if (
     x >= SPIRE_RAMP.startX &&
     x <= SPIRE_RAMP.endX &&
@@ -51,43 +73,10 @@ export function getSurfaceHeight(x: number, z: number): number {
     return t * SPIRE_RAMP.topY;
   }
 
-  // Subtle undulating wasteland ground outside main roads
+  // Subtle undulating wasteland ground outside main roads & base clearing
   const distFromOrigin = Math.hypot(x, z);
-  if (distFromOrigin < 13) return 0;
-  return (Math.sin(x * 0.08) * Math.cos(z * 0.08)) * 0.18;
-}
-
-export function isPositionBlockedBySpireWalls(
-  x: number,
-  z: number,
-  currentY: number
-): boolean {
-  // Prevent walking through the vertical side walls of the elevated spire deck from ground level
-  const inDeckXZ =
-    x >= SPIRE_DECK.minX - 0.7 &&
-    x <= SPIRE_DECK.maxX + 0.7 &&
-    z >= SPIRE_DECK.minZ - 0.7 &&
-    z <= SPIRE_DECK.maxZ + 0.7;
-
-  if (inDeckXZ && currentY < SPIRE_DECK.topY - 1.6) {
-    return true;
-  }
-
-  const inRampXZ =
-    x >= SPIRE_RAMP.startX + 2.0 &&
-    x <= SPIRE_RAMP.endX &&
-    Math.abs(z - SPIRE_RAMP.centerZ) <= SPIRE_RAMP.halfWidth + 0.6;
-
-  if (inRampXZ) {
-    const rampY =
-      ((x - SPIRE_RAMP.startX) / (SPIRE_RAMP.endX - SPIRE_RAMP.startX)) *
-      SPIRE_RAMP.topY;
-    if (rampY - currentY > 1.8) {
-      return true;
-    }
-  }
-
-  return false;
+  if (distFromOrigin < 14 || Math.abs(x) < 3.6 || Math.abs(z) < 3.6) return 0;
+  return Math.sin(x * 0.08) * Math.cos(z * 0.08) * 0.22;
 }
 
 function seededRandom(seed: number): () => number {
@@ -108,18 +97,17 @@ export function generateWastelandData(seed: number): {
   const hazards: HazardZone[] = [];
 
   const isReservedArea = (x: number, z: number, minClearance: number): boolean => {
-    // Player spawn & Base Camp zone around (0, 0) and (-8..8, -12..6)
-    if (x > -12 && x < 11 && z > -13 && z < 8) return true;
+    // Player spawn & Base Camp zone
+    if (x > -12.5 && x < 11.5 && z > -13.5 && z < 8.5) return true;
 
     // Spire ramp & deck footprint
-    if (x > 7 && x < 42 && z > -35 && z < -17) return true;
+    if (x > 6.5 && x < 42.5 && z > -35.5 && z < -16.5) return true;
 
-    // Main cross-streets kept walkable (with vehicles/scrap allowed near curbs)
-    if (minClearance > 2.4 && (Math.abs(x) < 3.6 || Math.abs(z) < 3.6)) {
+    // Main cross-streets kept walkable
+    if (minClearance > 2.2 && (Math.abs(x) < 3.8 || Math.abs(z) < 3.8)) {
       return true;
     }
 
-    // Existing nodes spacing
     for (const n of nodes) {
       const dist = Math.hypot(x - n.x, z - n.z);
       if (dist < n.colliderRadius + minClearance + 1.4) return true;
@@ -132,7 +120,7 @@ export function generateWastelandData(seed: number): {
     return false;
   };
 
-  // 1. Add the High-Altitude Spire Flare Pad node
+  // 1. High-Altitude Spire Flare Pad node
   nodes.push({
     id: 'spire-flare-pad',
     kind: 'spire_pad',
@@ -149,9 +137,81 @@ export function generateWastelandData(seed: number): {
     cooldownDuration: 0,
   });
 
-  // 2. Generate 9 Radioactive Fallout Craters (away from spawn & main crossroad center)
+  // 2. Place 6 Civil Defense Emergency Terminals across key landmarks
+  const terminalPlacements: {
+    x: number;
+    z: number;
+    rot: number;
+    label: string;
+    loreId: string;
+  }[] = [
+    {
+      x: 5.5,
+      z: 4.8,
+      rot: -0.6,
+      label: 'Civil Defense Relay #01 (Crossroads)',
+      loreId: LORE_LOGS[0].id,
+    },
+    {
+      x: 8.6,
+      z: -21.2,
+      rot: 0.3,
+      label: 'DOT Overpass Terminal #02',
+      loreId: LORE_LOGS[4].id,
+    },
+    {
+      x: 30.2,
+      z: -22.4,
+      rot: -0.4,
+      label: 'Spire Watchman Console #03',
+      loreId: LORE_LOGS[5].id,
+    },
+    {
+      x: -28.5,
+      z: 5.2,
+      rot: 1.2,
+      label: 'West Avenue Weather Relay #04',
+      loreId: LORE_LOGS[7].id,
+    },
+    {
+      x: 4.8,
+      z: 34.0,
+      rot: -2.1,
+      label: 'South Perimeter Telemetry Box #05',
+      loreId: LORE_LOGS[9].id,
+    },
+    {
+      x: -24.0,
+      z: -32.0,
+      rot: 0.75,
+      label: 'Meridian Recon Terminal #06',
+      loreId: LORE_LOGS[11].id,
+    },
+  ];
+
+  terminalPlacements.forEach((tp, idx) => {
+    const ty = getSurfaceHeight(tp.x, tp.z);
+    nodes.push({
+      id: `terminal-${idx}`,
+      kind: 'terminal',
+      label: tp.label,
+      x: tp.x,
+      y: ty,
+      z: tp.z,
+      interactRadius: 3.6,
+      colliderRadius: 0.85,
+      rotationY: tp.rot,
+      scale: 1,
+      variant: idx % 2,
+      cooldownRemaining: 0,
+      cooldownDuration: 60,
+      loreId: tp.loreId,
+    });
+  });
+
+  // 3. Generate 9 Radioactive Fallout Craters
   let hazardAttempts = 0;
-  while (hazards.length < 9 && hazardAttempts < 300) {
+  while (hazards.length < 9 && hazardAttempts < 320) {
     hazardAttempts++;
     const x = (rand() - 0.5) * 116;
     const z = (rand() - 0.5) * 116;
@@ -165,7 +225,7 @@ export function generateWastelandData(seed: number): {
     });
   }
 
-  // 3. Generate 42 Ruined Buildings across city blocks (2% chance of Chemicals per scavenge!)
+  // 4. Generate 42 Ruined Buildings with Oriented Bounding Box (OBB) dimensions
   let buildingAttempts = 0;
   let buildingCount = 0;
   const buildingNames = [
@@ -176,12 +236,13 @@ export function generateWastelandData(seed: number): {
     'Crumbling Corner Tenement',
     'Bombed Department Store',
   ];
-  while (buildingCount < 42 && buildingAttempts < 900) {
+  while (buildingCount < 42 && buildingAttempts < 950) {
     buildingAttempts++;
     const x = (rand() - 0.5) * 124;
     const z = (rand() - 0.5) * 124;
     if (isReservedArea(x, z, 4.0)) continue;
     const variant = Math.floor(rand() * 4);
+    const scale = 0.9 + rand() * 0.28;
     nodes.push({
       id: `building-${buildingCount}`,
       kind: 'building',
@@ -189,18 +250,20 @@ export function generateWastelandData(seed: number): {
       x,
       y: getSurfaceHeight(x, z),
       z,
-      interactRadius: 5.2,
-      colliderRadius: 2.9,
-      rotationY: Math.floor(rand() * 4) * (Math.PI / 2) + (rand() - 0.5) * 0.15,
-      scale: 0.9 + rand() * 0.3,
+      interactRadius: 5.4,
+      colliderRadius: 2.9 * scale,
+      boxHalfW: 2.65 * scale,
+      boxHalfD: 2.55 * scale,
+      rotationY: Math.floor(rand() * 4) * (Math.PI / 2) + (rand() - 0.5) * 0.14,
+      scale,
       variant,
       cooldownRemaining: 0,
-      cooldownDuration: 55, // Replenishes shifting rubble roughly every ~1 in-game day
+      cooldownDuration: 55,
     });
     buildingCount++;
   }
 
-  // 4. Generate 32 Rusted Vehicles along streets and intersections
+  // 5. Generate 32 Rusted Vehicles with OBB hull dimensions
   let vehicleAttempts = 0;
   let vehicleCount = 0;
   const vehicleNames = [
@@ -211,18 +274,18 @@ export function generateWastelandData(seed: number): {
   ];
   while (vehicleCount < 32 && vehicleAttempts < 700) {
     vehicleAttempts++;
-    // Bias vehicles somewhat near roads or open avenues
     const nearRoad = rand() < 0.55;
     let x = (rand() - 0.5) * 120;
     let z = (rand() - 0.5) * 120;
     if (nearRoad) {
       if (rand() < 0.5) {
-        x = (rand() < 0.5 ? -1 : 1) * (2.2 + rand() * 2.5);
+        x = (rand() < 0.5 ? -1 : 1) * (2.3 + rand() * 2.4);
       } else {
-        z = (rand() < 0.5 ? -1 : 1) * (2.2 + rand() * 2.5);
+        z = (rand() < 0.5 ? -1 : 1) * (2.3 + rand() * 2.4);
       }
     }
     if (isReservedArea(x, z, 2.0)) continue;
+    const scale = 0.92 + rand() * 0.2;
     nodes.push({
       id: `vehicle-${vehicleCount}`,
       kind: 'vehicle',
@@ -231,9 +294,11 @@ export function generateWastelandData(seed: number): {
       y: getSurfaceHeight(x, z),
       z,
       interactRadius: 3.8,
-      colliderRadius: 1.55,
+      colliderRadius: 1.65 * scale,
+      boxHalfW: 0.92 * scale,
+      boxHalfD: 1.78 * scale,
       rotationY: rand() * Math.PI * 2,
-      scale: 0.92 + rand() * 0.2,
+      scale,
       variant: Math.floor(rand() * 3),
       cooldownRemaining: 0,
       cooldownDuration: 50,
@@ -241,7 +306,7 @@ export function generateWastelandData(seed: number): {
     vehicleCount++;
   }
 
-  // 5. Generate 40 Salvageable Scrap Piles
+  // 6. Generate 40 Salvageable Scrap Piles
   let scrapAttempts = 0;
   let scrapCount = 0;
   while (scrapCount < 40 && scrapAttempts < 800) {
@@ -267,7 +332,7 @@ export function generateWastelandData(seed: number): {
     scrapCount++;
   }
 
-  // 6. Generate 38 Dead Timber / Scorched Tree Groves (natural wood resource nodes)
+  // 7. Generate 38 Dead Timber / Scorched Tree Groves
   let timberAttempts = 0;
   let timberCount = 0;
   while (timberCount < 38 && timberAttempts < 800) {

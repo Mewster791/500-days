@@ -10,6 +10,8 @@ interface EndScreensProps {
   phase: GamePhase.Victory | GamePhase.GameOver;
   difficulty: Difficulty;
   daysElapsed: number;
+  logsRecovered: number;
+  totalLogs: number;
   victoryMethod: VictoryMethod;
   deathCause: DeathCause;
   onRetrySameDifficulty: () => void;
@@ -20,6 +22,8 @@ export const EndScreens: React.FC<EndScreensProps> = ({
   phase,
   difficulty,
   daysElapsed,
+  logsRecovered,
+  totalLogs,
   victoryMethod,
   deathCause,
   onRetrySameDifficulty,
@@ -34,7 +38,7 @@ export const EndScreens: React.FC<EndScreensProps> = ({
             <div className="text-xs font-medium text-amber-400">
               {victoryMethod === 'flare'
                 ? 'High-Altitude Signal Flare Intercepted'
-                : '500-Day Quarantine Countdown Completed'}
+                : 'Operation Longshore · Day 500 Convoy Arrival'}
             </div>
             <h1 className="font-display text-5xl font-bold text-stone-100 tracking-tight">
               Rescued!
@@ -43,18 +47,23 @@ export const EndScreens: React.FC<EndScreensProps> = ({
 
           <p className="text-sm text-stone-300 leading-relaxed">
             {victoryMethod === 'flare'
-              ? 'An airship from an unknown surviving maritime nation spotted your crimson flare cutting above the nuclear haze and extracted you from the overpass spire.'
-              : 'You endured all 500 days in the irradiated ruins until the armored relief convoy breached the city perimeter and brought you to safety.'}
+              ? 'A high-altitude reconnaissance airship from an unaligned southern archipelago nation spotted your strontium-red flare above the inversion layer and winched you aboard from the New Vespera Spire.'
+              : 'Crawler Battalion "Iron Plow" from Flotilla Meridian breached Sector 09 on Day 500, locating your fortified shelter and extracting you safely beyond the ash wall.'}
           </p>
 
-          <div className="py-4 px-5 bg-stone-900 border border-stone-800 rounded-lg flex items-center justify-around">
+          <div className="py-4 px-4 bg-stone-900 border border-stone-800 rounded-lg grid grid-cols-3 gap-2">
             <div>
               <div className="text-xs text-stone-400">Days to Escape</div>
-              <div className="font-display text-3xl font-bold text-amber-400 font-mono tabular-nums mt-0.5">
+              <div className="font-display text-2xl font-bold text-amber-400 font-mono tabular-nums mt-0.5">
                 {formattedDays} {formattedDays === 1 ? 'Day' : 'Days'}
               </div>
             </div>
-            <div className="h-8 w-px bg-stone-800" />
+            <div className="border-x border-stone-800 px-2">
+              <div className="text-xs text-stone-400">Logs Archived</div>
+              <div className="font-display text-2xl font-bold text-stone-200 font-mono tabular-nums mt-0.5">
+                {logsRecovered}/{totalLogs}
+              </div>
+            </div>
             <div>
               <div className="text-xs text-stone-400">Difficulty</div>
               <div className="font-display text-2xl font-bold text-stone-200 capitalize mt-0.5">
@@ -86,17 +95,22 @@ export const EndScreens: React.FC<EndScreensProps> = ({
 
   const deathDescription =
     deathCause === 'radiation'
-      ? 'Acute radiation sickness from lingering inside a toxic fallout crater.'
+      ? 'Acute radiation sickness from lingering inside a vitrified fallout crater.'
+      : deathCause === 'acid_rain'
+      ? 'Corrosive Acid Rain wore down your health away from overhead shelter.'
+      : deathCause === 'fall_impact'
+      ? 'Lethal trauma from plummeting off the sheared overpass span onto broken asphalt.'
       : deathCause === 'dehydration'
-      ? 'Severe dehydration claimed your strength before clean water could be found.'
-      : 'Starvation exhausted your last reserves in the ruined city.';
+      ? 'Severe dehydration claimed your strength before clean water could be distilled.'
+      : 'Starvation exhausted your last reserves in Quarantine Sector 09.';
 
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center p-6 bg-stone-950/88">
       <div className="w-full max-w-lg bg-stone-950 border border-red-800/60 rounded-xl p-8 shadow-2xl space-y-6 text-center">
         <div className="space-y-2">
           <div className="text-xs font-medium text-red-400 capitalize">
-            Day {Math.max(1, daysElapsed)} · {difficulty} Mode
+            Day {Math.max(1, daysElapsed)} · {difficulty} Mode · {logsRecovered}/
+            {totalLogs} Logs
           </div>
           <h1
             className="font-display text-4xl font-bold text-stone-100 tracking-tight"
